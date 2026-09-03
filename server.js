@@ -61,6 +61,8 @@ function createRoom(opts) {
     max: Math.min(64, Math.max(1, opts.max | 0 || 8)),
     edits: new Map(),
     players: new Map(),
+    vehicles: new Map(),
+    time: 0.28,
     dirty: false,
     born: Date.now()
   };
@@ -86,6 +88,16 @@ function saveRoom(room) {
     edits: Array.from(room.edits, ([k, v]) => [k, v])
   }), () => {});
 }
+
+// one clock for the whole room, ticked here so nobody drifts
+setInterval(() => {
+  for (const room of rooms.values()) {
+    if (!room.players.size) continue;
+    room.time = (room.time + 2 / 600) % 1;
+    const msg = JSON.stringify({ t: 'time', time: room.time });
+    for (const p of room.players.values()) p.socket.send(msg);
+  }
+}, 2000);
 
 setInterval(() => {
   for (const room of rooms.values()) {
@@ -300,6 +312,8 @@ server.on('upgrade', (req, raw) => {
       t: 'welcome', you: id, room: room.code, serverName: room.name,
       seed: room.seed, mode: room.mode, max: room.max,
       edits: Array.from(room.edits, ([k, v]) => [k, v]),
+      time: room.time,
+      vehicles: Array.from(room.vehicles.values()),
       players: Array.from(room.players.values()).filter(p => p.id !== id)
         .map(p => ({ id: p.id, name: p.name, skin: p.skin, x: p.x, y: p.y, z: p.z, yaw: p.yaw }))
     }));
@@ -350,6 +364,12 @@ server.on('upgrade', (req, raw) => {
       room.edits.set((m.x | 0) + ',' + (m.y | 0) + ',' + (m.z | 0), m.b | 0);
       room.dirty = true;
       broadcast({ t: 'edit', id, x: m.x | 0, y: m.y | 0, z: m.z | 0, b: m.b | 0 }, id);
+    } else if (m.t === 'vehicle') {
+      if (m.gone) room.vehicles.delete(m.id);
+      else room.vehicles.set(m.id, { id: m.id, item: m.item, x: m.x, y: m.y, z: m.z, yaw: m.yaw, lights: !!m.lights });
+      broadcast({ t: 'vehicle', id: m.id, item: m.item, x: m.x, y: m.y, z: m.z, yaw: m.yaw, lights: m.lights, gone: m.gone }, id);
+    } else if (m.t === 'ping') {
+      player.socket.send(JSON.stringify({ t: 'pong' }));
     } else if (m.t === 'chat') {
       broadcast({ t: 'chat', id, name: player.name, msg: String(m.msg).slice(0, 200) });
     }
