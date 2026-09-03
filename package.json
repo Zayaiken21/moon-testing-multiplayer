@@ -1,0 +1,8 @@
+{
+  "name": "voxelia-server",
+  "version": "1.0.0",
+  "description": "Voxelia game server: rooms, block sync and world saves",
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "engines": { "node": ">=18" }
+}
