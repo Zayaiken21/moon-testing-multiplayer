@@ -94,6 +94,13 @@ setInterval(() => {
   for (const room of rooms.values()) {
     if (!room.players.size) continue;
     room.time = (room.time + 2 / 600) % 1;
+    room.weatherIn = (room.weatherIn || 90) - 2;
+    if (room.weatherIn <= 0) {
+      const kinds = ['clear', 'clear', 'cloudy', 'rain', 'snow'];
+      room.weather = kinds[Math.floor(Math.random() * kinds.length)];
+      room.weatherIn = 120 + Math.random() * 180;
+      for (const p of room.players.values()) p.socket.send(JSON.stringify({ t: 'weather', weather: room.weather }));
+    }
     const msg = JSON.stringify({ t: 'time', time: room.time });
     for (const p of room.players.values()) p.socket.send(msg);
   }
@@ -314,10 +321,13 @@ server.on('upgrade', (req, raw) => {
       edits: Array.from(room.edits, ([k, v]) => [k, v]),
       time: room.time,
       vehicles: Array.from(room.vehicles.values()),
+      weather: room.weather || 'clear',
       players: Array.from(room.players.values()).filter(p => p.id !== id)
         .map(p => ({ id: p.id, name: p.name, skin: p.skin, x: p.x, y: p.y, z: p.z, yaw: p.yaw }))
     }));
     broadcast({ t: 'join', id, name: player.name, skin: player.skin }, id);
+    // tell the newcomer who is already here, so voice can be dialled up
+    sock.send(JSON.stringify({ t: 'roster', players: Array.from(room.players.keys()).filter(p => p !== id) }));
     console.log(player.name + ' entered room ' + room.code + ' (' + room.players.size + '/' + room.max + ')');
   };
 
@@ -368,6 +378,11 @@ server.on('upgrade', (req, raw) => {
       if (m.gone) room.vehicles.delete(m.id);
       else room.vehicles.set(m.id, { id: m.id, item: m.item, x: m.x, y: m.y, z: m.z, yaw: m.yaw, lights: !!m.lights });
       broadcast({ t: 'vehicle', id: m.id, item: m.item, x: m.x, y: m.y, z: m.z, yaw: m.yaw, lights: m.lights, gone: m.gone }, id);
+    } else if (m.t === 'signal') {
+      const dest = room.players.get(m.to);
+      if (dest) dest.socket.send(JSON.stringify({ t: 'signal', from: id, data: m.data }));
+    } else if (m.t === 'voice') {
+      broadcast({ t: 'voice', id, on: !!m.on }, id);
     } else if (m.t === 'ping') {
       player.socket.send(JSON.stringify({ t: 'pong' }));
     } else if (m.t === 'chat') {
