@@ -3,6 +3,10 @@
   "version": "1.0.0",
   "description": "Voxelia game server: rooms, block sync and world saves",
   "main": "server.js",
-  "scripts": { "start": "node server.js" },
-  "engines": { "node": ">=18" }
+  "scripts": {
+    "start": "node server.js",
+    "build": "echo no build step needed"
+  },
+  "engines": { "node": "20.x" },
+  "dependencies": {}
 }

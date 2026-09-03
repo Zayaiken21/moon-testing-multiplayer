@@ -312,7 +312,20 @@ server.on('upgrade', (req, raw) => {
     try { m = JSON.parse(text); } catch (e) { return; }
 
     if (m.t === 'host' && !room) {
-      const r = createRoom({ name: m.name, seed: m.seed, mode: m.mode, public: m.public, max: m.max, code: m.code });
+      // a host coming back to the same world keeps its code, as long as nobody
+      // else is using it
+      const asked = String(m.code || '');
+      const existing = rooms.get(asked);
+      if (existing && !existing.players.size) {
+        existing.name = String(m.name || existing.name).slice(0, 48);
+        existing.public = m.public !== false;
+        existing.max = Math.min(64, Math.max(1, m.max | 0 || existing.max));
+        existing.emptiedAt = 0;
+        console.log('Room ' + asked + ' reopened by its host.');
+        enter(existing, m.player, m.skin);
+        return;
+      }
+      const r = createRoom({ name: m.name, seed: m.seed, mode: m.mode, public: m.public, max: m.max, code: asked });
       enter(r, m.player, m.skin);
       return;
     }
