@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: voxelia
+    runtime: node
+    plan: free
+    # there is nothing to compile, but Render insists on a real command
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /rooms
+    envVars:
+      - key: NODE_VERSION
+        value: "20.11.1"
