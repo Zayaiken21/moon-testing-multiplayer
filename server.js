@@ -61,6 +61,8 @@ function createRoom(opts) {
     max: Math.min(64, Math.max(1, opts.max | 0 || 8)),
     edits: new Map(),
     players: new Map(),
+    spots: new Map(),          // name -> where they last were
+    host: null,
     vehicles: new Map(),
     time: 0.28,
     dirty: false,
@@ -315,8 +317,11 @@ server.on('upgrade', (req, raw) => {
     room = r;
     const player = { id, name: String(name || 'Wanderer').slice(0, 24), skin: skin || {}, socket: sock, x: 0, y: 40, z: 0, yaw: 0 };
     room.players.set(id, player);
+    const spot = room.spots.get(player.name) || null;
     sock.send(JSON.stringify({
       t: 'welcome', you: id, room: room.code, serverName: room.name,
+      resume: spot,
+      host: room.host === id,
       seed: room.seed, mode: room.mode, max: room.max,
       edits: Array.from(room.edits, ([k, v]) => [k, v]),
       time: room.time,
@@ -346,10 +351,12 @@ server.on('upgrade', (req, raw) => {
         existing.max = Math.min(64, Math.max(1, m.max | 0 || existing.max));
         existing.emptiedAt = 0;
         console.log('Room ' + asked + ' reopened by its host.');
-        enter(existing, m.player, m.skin);
+        existing.host = id;
+      enter(existing, m.player, m.skin);
         return;
       }
       const r = createRoom({ name: m.name, seed: m.seed, mode: m.mode, public: m.public, max: m.max, code: asked });
+      r.host = id;
       enter(r, m.player, m.skin);
       return;
     }
@@ -368,6 +375,7 @@ server.on('upgrade', (req, raw) => {
 
     if (m.t === 'move') {
       player.x = m.x; player.y = m.y; player.z = m.z; player.yaw = m.yaw;
+      room.spots.set(player.name, { x: m.x, y: m.y, z: m.z, yaw: m.yaw });
       broadcast({ t: 'move', id, name: player.name, skin: player.skin, x: m.x, y: m.y, z: m.z, yaw: m.yaw }, id);
     } else if (m.t === 'edit') {
       if (!Number.isFinite(m.x) || !Number.isFinite(m.y) || !Number.isFinite(m.z)) return;
@@ -394,8 +402,18 @@ server.on('upgrade', (req, raw) => {
     if (!room) return;
     const player = room.players.get(id);
     if (!player) return;
+    room.spots.set(player.name, { x: player.x, y: player.y, z: player.z, yaw: player.yaw });
     room.players.delete(id);
     broadcast({ t: 'leave', id });
+    // the host walking out closes the room: everyone goes back to the title
+    if (room.host === id) {
+      const bye = JSON.stringify({ t: 'hostleft', room: room.code });
+      for (const p of room.players.values()) { p.socket.send(bye); }
+      setTimeout(() => { for (const p of room.players.values()) p.socket.close(); }, 400);
+      room.dirty = true;
+      saveRoom(room);
+      console.log('Host left room ' + room.code + ' \u2014 everyone sent home.');
+    }
     if (!room.players.size) { room.emptiedAt = Date.now(); saveRoom(room); }
     console.log(player.name + ' left room ' + room.code + ' (' + room.players.size + '/' + room.max + ')');
   };
