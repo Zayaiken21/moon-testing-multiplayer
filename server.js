@@ -211,7 +211,7 @@ function hubList() {
   const now = Date.now();
   for (const [k, v] of hub) if (now - v.seen > 90000) hub.delete(k);
   return Array.from(hub.values())
-    .filter(v => !v.private)
+    .filter(v => !v.private && !v.closed)
     .map(v => ({
       name: v.name, seed: v.seed, address: v.address, room: v.room,
       players: v.players, maxPlayers: v.maxPlayers
@@ -252,7 +252,7 @@ const server = http.createServer((req, res) => {
 
   if (url === '/rooms' || url === '/games') {
     json(200, Array.from(rooms.values())
-      .filter(r => r.public)
+      .filter(r => r.public && !r.closed)
       .map(r => ({ code: r.code, name: r.name, seed: r.seed, mode: r.mode,
                    players: r.players.size, max: r.max })));
     return;
@@ -363,7 +363,7 @@ server.on('upgrade', (req, raw) => {
 
     if (m.t === 'join' && !room) {
       const r = rooms.get(String(m.room || ''));
-      if (!r) { sock.send(JSON.stringify({ t: 'error', why: 'No room with that code is open.' })); return; }
+      if (!r || r.closed) { sock.send(JSON.stringify({ t: 'error', why: 'That room has closed.' })); return; }
       if (r.players.size >= r.max) { sock.send(JSON.stringify({ t: 'error', why: 'That room is full.' })); return; }
       enter(r, m.name, m.skin);
       return;
@@ -407,11 +407,16 @@ server.on('upgrade', (req, raw) => {
     broadcast({ t: 'leave', id });
     // the host walking out closes the room: everyone goes back to the title
     if (room.host === id) {
+      room.public = false;             // off the list at once
+      room.closed = true;
       const bye = JSON.stringify({ t: 'hostleft', room: room.code });
       for (const p of room.players.values()) { p.socket.send(bye); }
       setTimeout(() => { for (const p of room.players.values()) p.socket.close(); }, 400);
       room.dirty = true;
       saveRoom(room);
+      setTimeout(() => {
+        if (!room.players.size) { rooms.delete(room.code); console.log('Room ' + room.code + ' closed.'); }
+      }, 1500);
       console.log('Host left room ' + room.code + ' \u2014 everyone sent home.');
     }
     if (!room.players.size) { room.emptiedAt = Date.now(); saveRoom(room); }
