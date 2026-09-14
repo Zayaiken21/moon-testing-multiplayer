@@ -281,6 +281,44 @@ function recordVisit(req, body) {
   statsDirty = true;
 }
 
+/* ---------- the ledger ----------
+   Money is decided here and nowhere else. The browser is only ever a display.
+   A creature is identified by the world it came from plus its own spawn key,
+   so the same animal can never be claimed twice, by anyone, ever.        */
+const LEDGER_FILE = path.join(__dirname, 'ledger.json');
+const ledger = {
+  accounts: {},        // account -> { balance, caught, claims, created, lastSeen }
+  claimed: {},         // creatureKey -> { account, at, cents }
+  paid: 0
+};
+if (fs.existsSync(LEDGER_FILE)) {
+  try { Object.assign(ledger, JSON.parse(fs.readFileSync(LEDGER_FILE, 'utf8'))); } catch (e) {}
+}
+let ledgerDirty = false;
+setInterval(() => {
+  if (!ledgerDirty) return;
+  ledgerDirty = false;
+  fs.writeFile(LEDGER_FILE, JSON.stringify(ledger), () => {});
+}, 8000);
+
+/* what a creature is worth, decided here so the client cannot argue */
+const RARITY_CENTS = { common: 1, uncommon: 3, rare: 8, exotic: 15, legendary: 25 };
+const DAILY_CAP_CENTS = 500;          // a sane ceiling per account per day
+
+function account(id) {
+  if (!ledger.accounts[id]) {
+    ledger.accounts[id] = {
+      balance: 0, caught: 0, claims: 0, today: 0, todayKey: '',
+      created: new Date().toISOString(), lastSeen: null
+    };
+  }
+  const a = ledger.accounts[id];
+  const key = new Date().toISOString().slice(0, 10);
+  if (a.todayKey !== key) { a.todayKey = key; a.today = 0; }
+  a.lastSeen = new Date().toISOString();
+  return a;
+}
+
 /* ---------- a light rate limit, per address ---------- */
 const hits = new Map();          // ip -> { n, since }
 const LIMIT = 120;               // requests
@@ -334,7 +372,14 @@ const server = http.createServer((req, res) => {
     const key = (req.url.split('key=')[1] || '').split('&')[0];
     if (key !== ADMIN_KEY) { json(401, { error: 'wrong key' }); return; }
     const days = Object.keys(stats.days).sort().slice(-30);
+    const accounts = Object.entries(ledger.accounts)
+      .sort((a, b) => b[1].balance - a[1].balance).slice(0, 40)
+      .map(([id, a]) => ({ id, balance: a.balance, caught: a.caught, lastSeen: a.lastSeen }));
     json(200, {
+      wallet: {
+        paid: ledger.paid, claimed: Object.keys(ledger.claimed).length,
+        accounts: Object.keys(ledger.accounts).length, top: accounts, rates: RARITY_CENTS
+      },
       total: stats.total, today: stats.today, firstSeen: stats.firstSeen,
       peakRooms: stats.peakRooms,
       days: days.map(d => ({ day: d, visits: stats.days[d] })),
@@ -349,6 +394,81 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+
+  /* claim a creature. The first account to tame it is paid; nobody after. */
+  if (url === '/claim' && req.method === 'POST') {
+    let body = '';
+    req.on('data', c => { body += c; if (body.length > 4096) req.destroy(); });
+    req.on('end', () => {
+      let m = {};
+      try { m = JSON.parse(body || '{}'); } catch (e) {}
+      const acc = String(m.account || '').slice(0, 64);
+      const key = String(m.creature || '').slice(0, 120);
+      const rarity = String(m.rarity || 'common');
+      const mode = String(m.mode || '');
+
+      if (!acc || !key) { json(400, { error: 'account and creature are required' }); return; }
+      if (mode !== 'survival') { json(200, { ok: false, why: 'Only survival counts.' }); return; }
+      if (!/^[a-zA-Z0-9_:\-.]+$/.test(key)) { json(400, { error: 'bad creature key' }); return; }
+
+      const a = account(acc);
+      const already = ledger.claimed[key];
+      if (already) {
+        json(200, {
+          ok: false, why: already.account === acc
+            ? 'You have already been paid for this one.'
+            : 'Someone else caught this one first.',
+          balance: a.balance, caught: a.caught
+        });
+        return;
+      }
+      const cents = RARITY_CENTS[rarity] !== undefined ? RARITY_CENTS[rarity] : 1;
+      if (a.today + cents > DAILY_CAP_CENTS) {
+        json(200, { ok: false, why: 'Daily limit reached. It resets tomorrow.',
+                    balance: a.balance, caught: a.caught });
+        return;
+      }
+      ledger.claimed[key] = { account: acc, at: Date.now(), cents };
+      a.balance += cents;
+      a.today += cents;
+      a.caught++;
+      a.claims++;
+      ledger.paid += cents;
+      ledgerDirty = true;
+      json(200, { ok: true, cents, balance: a.balance, caught: a.caught, rarity });
+    });
+    return;
+  }
+
+  if (url.startsWith('/wallet')) {
+    const acc = (req.url.split('account=')[1] || '').split('&')[0];
+    if (!acc) { json(400, { error: 'account required' }); return; }
+    const a = account(decodeURIComponent(acc).slice(0, 64));
+    json(200, {
+      balance: a.balance, caught: a.caught, today: a.today,
+      dailyCap: DAILY_CAP_CENTS, rates: RARITY_CENTS
+    });
+    return;
+  }
+
+  /* a pet changing hands: the new owner is recorded, but never paid again */
+  if (url === '/transfer' && req.method === 'POST') {
+    let body = '';
+    req.on('data', c => { body += c; if (body.length > 2048) req.destroy(); });
+    req.on('end', () => {
+      let m = {};
+      try { m = JSON.parse(body || '{}'); } catch (e) {}
+      const key = String(m.creature || '').slice(0, 120);
+      const to = String(m.to || '').slice(0, 64);
+      const rec = ledger.claimed[key];
+      if (!rec) { json(200, { ok: false, why: 'That creature was never claimed.' }); return; }
+      rec.owner = to;                 // ownership moves
+      rec.transfers = (rec.transfers || 0) + 1;
+      ledgerDirty = true;             // the payout does not move with it
+      json(200, { ok: true, paidTo: rec.account, owner: to, note: 'Ownership moved; no further payment.' });
+    });
+    return;
+  }
 
   if (url === '/rooms' || url === '/games') {
     res.setHeader('cache-control', 'public, max-age=8');

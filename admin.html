@@ -22,7 +22,18 @@ header{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;
   padding:26px clamp(16px,4vw,44px) 10px}
 h1{font-family:var(--display);font-size:clamp(24px,4vw,34px);margin:0;letter-spacing:-.01em}
 header span{color:var(--sky);font-family:var(--display);font-size:13px}
-main{padding:0 clamp(16px,4vw,44px) 44px;max-width:1180px;margin:0 auto}
+main{padding:0 clamp(16px,4vw,44px) 44px;max-width:1180px;margin:0 auto;display:none}
+main.ready{display:block}
+#gate{display:grid;place-items:center;padding:6vh 16px}
+#gate.hidden{display:none}
+.gate-card{width:min(420px,92vw);background:linear-gradient(160deg,var(--panel-2),var(--panel));
+  border:1px solid var(--line);border-radius:18px;padding:26px;
+  box-shadow:0 24px 60px rgba(0,0,0,.45)}
+.gate-card h2{font-family:var(--display);margin:0 0 4px;font-size:20px}
+.gate-card input{width:100%;margin:14px 0 12px;background:var(--panel);border:1px solid var(--line);
+  border-radius:10px;padding:12px 14px;color:var(--ink);font-family:var(--display)}
+.gate-card input:focus{outline:2px solid var(--sky);outline-offset:1px}
+.gate-card button{width:100%}
 .key-row{display:flex;gap:8px;margin:14px 0 22px;flex-wrap:wrap}
 .key-row input{flex:1;min-width:200px;background:var(--panel);border:1px solid var(--line);
   border-radius:10px;padding:11px 14px;color:var(--ink);font-family:var(--display)}
@@ -68,15 +79,23 @@ td.num{color:var(--glow);font-family:var(--display)}
   <span>admin · live</span>
 </header>
 
+<section id="gate">
+  <div class="gate-card">
+    <h2>Sign in</h2>
+    <p class="note">Enter the admin key set on the server.</p>
+    <input id="key" type="password" placeholder="admin key" autocomplete="current-password" />
+    <button id="load">Open the dashboard</button>
+    <div id="error"></div>
+    <p class="note" style="margin-top:14px">Set it with <code>node server.js --admin yourkey</code>,
+      or an <code>ADMIN_KEY</code> variable on Render.</p>
+  </div>
+</section>
+
 <main>
   <div class="key-row">
-    <input id="key" placeholder="admin key" />
-    <button id="load">Open</button>
     <button class="ghost" id="auto">Auto refresh: on</button>
+    <button class="ghost" id="signout">Sign out</button>
   </div>
-  <p class="note">Set the key when you start the server: <code>node server.js --admin yourkey</code>,
-     or with an <code>ADMIN_KEY</code> environment variable on Render.</p>
-  <div id="error"></div>
 
   <div class="cards">
     <div class="card"><small>Opens, all time</small><b id="total">—</b></div>
@@ -85,6 +104,17 @@ td.num{color:var(--glow);font-family:var(--display)}
     <div class="card"><small>Players in rooms</small><b id="players">—</b></div>
     <div class="card"><small>Busiest ever</small><b id="peak">—</b></div>
   </div>
+
+  <section>
+    <h2>Player earnings</h2>
+    <div class="cards">
+      <div class="card"><small>Paid out</small><b id="w-paid">—</b></div>
+      <div class="card"><small>Creatures claimed</small><b id="w-claimed">—</b></div>
+      <div class="card"><small>Accounts</small><b id="w-accounts">—</b></div>
+    </div>
+    <table style="margin-top:12px"><thead><tr><th>Account</th><th>Balance</th><th>Caught</th><th>Last seen</th></tr></thead>
+      <tbody id="w-top"></tbody></table>
+  </section>
 
   <section>
     <h2>Last 30 days</h2>
@@ -129,6 +159,8 @@ async function load() {
     const res = await fetch('/admin/data?key=' + encodeURIComponent(key));
     if (!res.ok) { $('#error').textContent = 'That key was not accepted.'; return; }
     $('#error').textContent = '';
+    $('#gate').classList.add('hidden');
+    document.querySelector('main').classList.add('ready');
     draw(await res.json());
   } catch (e) {
     $('#error').textContent = 'Could not reach the server.';
@@ -136,6 +168,16 @@ async function load() {
 }
 
 function draw(d) {
+  const w = d.wallet || { paid: 0, claimed: 0, accounts: 0, top: [] };
+  const money = (c) => '$' + ((c || 0) / 100).toFixed(2);
+  $('#w-paid').textContent = money(w.paid);
+  $('#w-claimed').textContent = fmt(w.claimed);
+  $('#w-accounts').textContent = fmt(w.accounts);
+  $('#w-top').innerHTML = (w.top || []).map(a =>
+    '<tr><td>' + a.id + '</td><td class="num">' + money(a.balance) + '</td>' +
+    '<td class="num">' + a.caught + '</td><td>' + (a.lastSeen || '').slice(0, 16).replace('T', ' ') +
+    '</td></tr>').join('') || '<tr><td class="note" colspan="4">Nobody has earned yet</td></tr>';
+
   $('#total').textContent = fmt(d.total);
   $('#today').textContent = fmt(d.today);
   const open = (d.rooms || []).filter(r => !r.closed);
@@ -172,6 +214,12 @@ function draw(d) {
 }
 
 $('#load').addEventListener('click', load);
+$('#signout').addEventListener('click', () => {
+  localStorage.removeItem('voxelia.adminkey');
+  $('#key').value = '';
+  $('#gate').classList.remove('hidden');
+  document.querySelector('main').classList.remove('ready');
+});
 $('#key').addEventListener('keydown', (e) => { if (e.key === 'Enter') load(); });
 $('#auto').addEventListener('click', () => {
   auto = !auto;
