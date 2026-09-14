@@ -236,6 +236,51 @@ function announce() {
 }
 if (DIRECTORY) setInterval(announce, 30000);
 
+/* ---------- who is opening the game ---------- */
+const STATS_FILE = path.join(__dirname, 'stats.json');
+const ADMIN_KEY = opt('admin', process.env.ADMIN_KEY || 'voxelia');
+
+const stats = {
+  total: 0, today: 0, todayKey: '', days: {}, referrers: {}, devices: {},
+  countries: {}, firstSeen: new Date().toISOString(), sessions: [], peakRooms: 0
+};
+if (fs.existsSync(STATS_FILE)) {
+  try { Object.assign(stats, JSON.parse(fs.readFileSync(STATS_FILE, 'utf8'))); } catch (e) {}
+}
+let statsDirty = false;
+setInterval(() => {
+  if (!statsDirty) return;
+  statsDirty = false;
+  fs.writeFile(STATS_FILE, JSON.stringify(stats), () => {});
+}, 10000);
+
+const dayKey = () => new Date().toISOString().slice(0, 10);
+
+function recordVisit(req, body) {
+  const key = dayKey();
+  if (stats.todayKey !== key) { stats.todayKey = key; stats.today = 0; }
+  stats.total++;
+  stats.today++;
+  stats.days[key] = (stats.days[key] || 0) + 1;
+  const ref = (body && body.ref) || req.headers.referer || 'direct';
+  const host = String(ref).replace(/^https?:\/\//, '').split('/')[0] || 'direct';
+  stats.referrers[host] = (stats.referrers[host] || 0) + 1;
+  const ua = String(req.headers['user-agent'] || '');
+  const device = /iPhone|iPod/.test(ua) ? 'iPhone' : /iPad/.test(ua) ? 'iPad'
+               : /Android/.test(ua) ? 'Android' : /Macintosh/.test(ua) ? 'Mac'
+               : /Windows/.test(ua) ? 'Windows' : /Linux/.test(ua) ? 'Linux' : 'other';
+  stats.devices[device] = (stats.devices[device] || 0) + 1;
+  stats.sessions.unshift({
+    at: new Date().toISOString(), device,
+    from: host, mode: (body && body.mode) || 'unknown',
+    standalone: !!(body && body.standalone)
+  });
+  if (stats.sessions.length > 200) stats.sessions.length = 200;
+  const live = Array.from(rooms.values()).length;
+  if (live > stats.peakRooms) stats.peakRooms = live;
+  statsDirty = true;
+}
+
 /* ---------- HTTP ---------- */
 const server = http.createServer((req, res) => {
   const cors = {
@@ -249,6 +294,46 @@ const server = http.createServer((req, res) => {
     res.writeHead(code, Object.assign({ 'content-type': 'application/json' }, cors));
     res.end(JSON.stringify(obj));
   };
+
+  if (url === '/visit') {
+    let body = '';
+    req.on('data', c => { body += c; if (body.length > 2048) req.destroy(); });
+    req.on('end', () => {
+      let parsed = {};
+      try { parsed = JSON.parse(body || '{}'); } catch (e) {}
+      recordVisit(req, parsed);
+      json(200, { ok: true });
+    });
+    return;
+  }
+
+  if (url === '/admin/data') {
+    const key = (req.url.split('key=')[1] || '').split('&')[0];
+    if (key !== ADMIN_KEY) { json(401, { error: 'wrong key' }); return; }
+    const days = Object.keys(stats.days).sort().slice(-30);
+    json(200, {
+      total: stats.total, today: stats.today, firstSeen: stats.firstSeen,
+      peakRooms: stats.peakRooms,
+      days: days.map(d => ({ day: d, visits: stats.days[d] })),
+      referrers: Object.entries(stats.referrers).sort((a, b) => b[1] - a[1]).slice(0, 12),
+      devices: Object.entries(stats.devices).sort((a, b) => b[1] - a[1]),
+      sessions: stats.sessions.slice(0, 40),
+      rooms: Array.from(rooms.values()).map(r => ({
+        code: r.code, name: r.name, players: r.players.size, max: r.max,
+        public: r.public, closed: !!r.closed, edits: r.edits.size
+      }))
+    });
+    return;
+  }
+
+  if (url === '/admin' || url === '/admin/') {
+    fs.readFile(path.join(__dirname, 'admin.html'), (err, data) => {
+      if (err) { res.writeHead(404, { 'content-type': 'text/plain' }); res.end('admin.html is missing'); return; }
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      res.end(data);
+    });
+    return;
+  }
 
   if (url === '/rooms' || url === '/games') {
     json(200, Array.from(rooms.values())
@@ -376,7 +461,9 @@ server.on('upgrade', (req, raw) => {
     if (m.t === 'move') {
       player.x = m.x; player.y = m.y; player.z = m.z; player.yaw = m.yaw;
       room.spots.set(player.name, { x: m.x, y: m.y, z: m.z, yaw: m.yaw });
-      broadcast({ t: 'move', id, name: player.name, skin: player.skin, x: m.x, y: m.y, z: m.z, yaw: m.yaw }, id);
+      if (m.realm) player.realm = String(m.realm).slice(0, 32);
+      broadcast({ t: 'move', id, name: player.name, skin: player.skin, x: m.x, y: m.y, z: m.z,
+                  yaw: m.yaw, riding: m.riding || null, realm: player.realm || 'ground' }, id);
     } else if (m.t === 'edit') {
       if (!Number.isFinite(m.x) || !Number.isFinite(m.y) || !Number.isFinite(m.z)) return;
       room.edits.set((m.x | 0) + ',' + (m.y | 0) + ',' + (m.z | 0), m.b | 0);
@@ -386,6 +473,18 @@ server.on('upgrade', (req, raw) => {
       if (m.gone) room.vehicles.delete(m.id);
       else room.vehicles.set(m.id, { id: m.id, item: m.item, x: m.x, y: m.y, z: m.z, yaw: m.yaw, lights: !!m.lights });
       broadcast({ t: 'vehicle', id: m.id, item: m.item, x: m.x, y: m.y, z: m.z, yaw: m.yaw, lights: m.lights, gone: m.gone }, id);
+    } else if (m.t === 'realm') {
+      player.realm = String(m.realm || 'ground').slice(0, 32);
+      broadcast({ t: 'realm', id, realm: player.realm }, id);
+    } else if (m.t === 'crew') {
+      // the pilot moves the whole crew at once, so nobody is left behind
+      const crew = Array.isArray(m.crew) ? m.crew.slice(0, 24) : [id];
+      const realm = String(m.realm || 'ground').slice(0, 32);
+      for (const c of crew) {
+        const cp = room.players.get(c);
+        if (cp) cp.realm = realm;
+      }
+      broadcast({ t: 'crew', realm, planet: m.planet, crew, site: m.site || null });
     } else if (m.t === 'signal') {
       const dest = room.players.get(m.to);
       if (dest) dest.socket.send(JSON.stringify({ t: 'signal', from: id, data: m.data }));

@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Voxelia · admin</title>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --deep:#081428; --panel:#0E2140; --panel-2:#143058; --line:#1E4173;
+  --ink:#E8F1FF; --muted:#8FAFD6; --sky:#4FC3F7; --wave:#2E86C1; --glow:#7FE3FF;
+  --display:"Chakra Petch", ui-sans-serif, system-ui, sans-serif;
+  --body:ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;background:
+  radial-gradient(1200px 700px at 15% -10%, #1B4A82 0%, transparent 60%),
+  radial-gradient(900px 600px at 110% 20%, #123A6B 0%, transparent 55%),
+  var(--deep);
+  color:var(--ink);font-family:var(--body);-webkit-font-smoothing:antialiased}
+header{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;
+  padding:26px clamp(16px,4vw,44px) 10px}
+h1{font-family:var(--display);font-size:clamp(24px,4vw,34px);margin:0;letter-spacing:-.01em}
+header span{color:var(--sky);font-family:var(--display);font-size:13px}
+main{padding:0 clamp(16px,4vw,44px) 44px;max-width:1180px;margin:0 auto}
+.key-row{display:flex;gap:8px;margin:14px 0 22px;flex-wrap:wrap}
+.key-row input{flex:1;min-width:200px;background:var(--panel);border:1px solid var(--line);
+  border-radius:10px;padding:11px 14px;color:var(--ink);font-family:var(--display)}
+.key-row input:focus{outline:2px solid var(--sky);outline-offset:1px}
+button{background:var(--sky);color:#04203A;border:none;border-radius:10px;padding:11px 18px;
+  font-family:var(--display);font-size:14px;cursor:pointer}
+button.ghost{background:var(--panel);color:var(--ink);border:1px solid var(--line)}
+button:hover{filter:brightness(1.08)}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}
+.card{background:linear-gradient(160deg, var(--panel-2), var(--panel));
+  border:1px solid var(--line);border-radius:16px;padding:18px;
+  box-shadow:0 10px 30px rgba(0,0,0,.34)}
+.card b{display:block;font-family:var(--display);font-size:clamp(26px,4vw,38px);color:var(--glow)}
+.card small{color:var(--muted);font-size:12px;letter-spacing:.03em;text-transform:uppercase}
+section{margin-top:26px}
+h2{font-family:var(--display);font-size:16px;color:var(--sky);margin:0 0 10px;
+  border-top:1px solid var(--line);padding-top:16px}
+.chart{display:flex;align-items:flex-end;gap:4px;height:170px;background:var(--panel);
+  border:1px solid var(--line);border-radius:14px;padding:14px}
+.bar{flex:1;min-width:5px;background:linear-gradient(180deg, var(--glow), var(--wave));
+  border-radius:5px 5px 2px 2px;position:relative}
+.bar:hover::after{content:attr(data-label);position:absolute;bottom:100%;left:50%;
+  transform:translateX(-50%);background:#04203A;border:1px solid var(--line);
+  border-radius:7px;padding:3px 8px;font-size:11px;white-space:nowrap;margin-bottom:6px}
+.split{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px}
+table{width:100%;border-collapse:collapse;background:var(--panel);
+  border:1px solid var(--line);border-radius:14px;overflow:hidden}
+th,td{text-align:left;padding:10px 13px;font-size:13px;border-bottom:1px solid var(--line)}
+th{background:var(--panel-2);font-family:var(--display);color:var(--muted);
+  font-weight:500;font-size:11.5px;text-transform:uppercase;letter-spacing:.05em}
+tr:last-child td{border-bottom:none}
+td.num{color:var(--glow);font-family:var(--display)}
+.pill{display:inline-block;background:var(--panel-2);border:1px solid var(--line);
+  border-radius:999px;padding:2px 9px;font-size:11px;color:var(--muted)}
+.pill.live{border-color:var(--sky);color:var(--sky)}
+.note{color:var(--muted);font-size:12.5px;line-height:1.5}
+#error{color:#FF9E9E;font-size:13px;margin-top:10px}
+</style>
+</head>
+<body>
+<header>
+  <h1>Voxelia</h1>
+  <span>admin · live</span>
+</header>
+
+<main>
+  <div class="key-row">
+    <input id="key" placeholder="admin key" />
+    <button id="load">Open</button>
+    <button class="ghost" id="auto">Auto refresh: on</button>
+  </div>
+  <p class="note">Set the key when you start the server: <code>node server.js --admin yourkey</code>,
+     or with an <code>ADMIN_KEY</code> environment variable on Render.</p>
+  <div id="error"></div>
+
+  <div class="cards">
+    <div class="card"><small>Opens, all time</small><b id="total">—</b></div>
+    <div class="card"><small>Opens today</small><b id="today">—</b></div>
+    <div class="card"><small>Rooms open now</small><b id="rooms">—</b></div>
+    <div class="card"><small>Players in rooms</small><b id="players">—</b></div>
+    <div class="card"><small>Busiest ever</small><b id="peak">—</b></div>
+  </div>
+
+  <section>
+    <h2>Last 30 days</h2>
+    <div class="chart" id="chart"></div>
+  </section>
+
+  <section class="split">
+    <div>
+      <h2>Where they came from</h2>
+      <table><thead><tr><th>Source</th><th>Opens</th></tr></thead><tbody id="refs"></tbody></table>
+    </div>
+    <div>
+      <h2>What they played on</h2>
+      <table><thead><tr><th>Device</th><th>Opens</th></tr></thead><tbody id="devices"></tbody></table>
+    </div>
+  </section>
+
+  <section>
+    <h2>Rooms</h2>
+    <table><thead><tr><th>Code</th><th>Name</th><th>Players</th><th>Changes</th><th></th></tr></thead>
+      <tbody id="roomlist"></tbody></table>
+  </section>
+
+  <section>
+    <h2>Recent opens</h2>
+    <table><thead><tr><th>When</th><th>Device</th><th>From</th><th>Installed</th></tr></thead>
+      <tbody id="sessions"></tbody></table>
+  </section>
+</main>
+
+<script>
+const $ = (s) => document.querySelector(s);
+let timer = null, auto = true;
+
+function fmt(n) { return (n === undefined || n === null) ? '—' : n.toLocaleString(); }
+
+async function load() {
+  const key = $('#key').value.trim();
+  if (!key) { $('#error').textContent = 'Enter the admin key.'; return; }
+  localStorage.setItem('voxelia.adminkey', key);
+  try {
+    const res = await fetch('/admin/data?key=' + encodeURIComponent(key));
+    if (!res.ok) { $('#error').textContent = 'That key was not accepted.'; return; }
+    $('#error').textContent = '';
+    draw(await res.json());
+  } catch (e) {
+    $('#error').textContent = 'Could not reach the server.';
+  }
+}
+
+function draw(d) {
+  $('#total').textContent = fmt(d.total);
+  $('#today').textContent = fmt(d.today);
+  const open = (d.rooms || []).filter(r => !r.closed);
+  $('#rooms').textContent = fmt(open.length);
+  $('#players').textContent = fmt(open.reduce((n, r) => n + r.players, 0));
+  $('#peak').textContent = fmt(d.peakRooms);
+
+  const max = Math.max(1, ...d.days.map(x => x.visits));
+  $('#chart').innerHTML = d.days.map(x =>
+    '<div class="bar" style="height:' + Math.max(3, (x.visits / max) * 100) + '%" ' +
+    'data-label="' + x.day + ' · ' + x.visits + '"></div>').join('') ||
+    '<span class="note">No visits recorded yet.</span>';
+
+  $('#refs').innerHTML = d.referrers.map(([host, n]) =>
+    '<tr><td>' + host + '</td><td class="num">' + n + '</td></tr>').join('') ||
+    '<tr><td class="note" colspan="2">Nothing yet</td></tr>';
+
+  $('#devices').innerHTML = d.devices.map(([name, n]) =>
+    '<tr><td>' + name + '</td><td class="num">' + n + '</td></tr>').join('') ||
+    '<tr><td class="note" colspan="2">Nothing yet</td></tr>';
+
+  $('#roomlist').innerHTML = (d.rooms || []).map(r =>
+    '<tr><td class="num">' + r.code + '</td><td>' + r.name + '</td>' +
+    '<td class="num">' + r.players + ' / ' + r.max + '</td>' +
+    '<td class="num">' + r.edits + '</td>' +
+    '<td><span class="pill ' + (r.closed ? '' : 'live') + '">' +
+    (r.closed ? 'closed' : (r.public ? 'open' : 'private')) + '</span></td></tr>').join('') ||
+    '<tr><td class="note" colspan="5">No rooms right now</td></tr>';
+
+  $('#sessions').innerHTML = (d.sessions || []).map(s =>
+    '<tr><td>' + s.at.slice(0, 16).replace('T', ' ') + '</td><td>' + s.device + '</td>' +
+    '<td>' + s.from + '</td><td>' + (s.standalone ? 'yes' : 'browser') + '</td></tr>').join('') ||
+    '<tr><td class="note" colspan="4">Nothing yet</td></tr>';
+}
+
+$('#load').addEventListener('click', load);
+$('#key').addEventListener('keydown', (e) => { if (e.key === 'Enter') load(); });
+$('#auto').addEventListener('click', () => {
+  auto = !auto;
+  $('#auto').textContent = 'Auto refresh: ' + (auto ? 'on' : 'off');
+  clearInterval(timer);
+  if (auto) timer = setInterval(load, 15000);
+});
+
+const saved = localStorage.getItem('voxelia.adminkey');
+if (saved) { $('#key').value = saved; load(); }
+timer = setInterval(() => { if (auto && $('#key').value) load(); }, 15000);
+</script>
+</body>
+</html>
