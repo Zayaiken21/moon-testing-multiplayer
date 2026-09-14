@@ -34,7 +34,7 @@ const DIRECTORY = opt('directory', '');
 const ROOM = opt('room', String(Math.floor(1000000 + Math.random() * 9000000)));
 const PRIVATE = has('private');
 const IS_HUB = has('hub');
-const CLIENT = path.join(__dirname, opt('client', 'voxelia.html'));
+/* the game is hosted separately, so nothing here serves it */
 const SAVE_FILE = path.join(__dirname, opt('save', 'world-' + SEED + '.json'));
 
 /* ---------- rooms ---------- */
@@ -349,14 +349,6 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  if (url === '/admin' || url === '/admin/') {
-    fs.readFile(path.join(__dirname, 'admin.html'), (err, data) => {
-      if (err) { res.writeHead(404, { 'content-type': 'text/plain' }); res.end('admin.html is missing'); return; }
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-      res.end(data);
-    });
-    return;
-  }
 
   if (url === '/rooms' || url === '/games') {
     res.setHeader('cache-control', 'public, max-age=8');
@@ -385,16 +377,28 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  if (url === '/' || url === '/index.html' || url === '/voxelia.html') {
-    fs.readFile(CLIENT, (err, data) => {
+  /* This service is the multiplayer server and nothing else. The game itself
+     lives on GitHub Pages, so the root here is the admin page. */
+  if (url === '/' || url === '/admin' || url === '/admin/') {
+    fs.readFile(path.join(__dirname, 'admin.html'), (err, data) => {
       if (err) {
-        res.writeHead(404, { 'content-type': 'text/plain' });
-        res.end('voxelia.html was not found next to server.js.');
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+        res.end('<!doctype html><meta charset="utf-8"><title>Voxelia server</title>' +
+                '<body style="background:#081428;color:#E8F1FF;font-family:system-ui;padding:40px">' +
+                '<h1>Voxelia server</h1><p>Running. The game is served from GitHub Pages; ' +
+                'this address only handles rooms and the admin page.</p>');
         return;
       }
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
       res.end(data);
     });
+    return;
+  }
+
+  if (url === '/index.html' || url === '/voxelia.html') {
+    // somebody looking for the game: send them to where it actually lives
+    res.writeHead(404, Object.assign({ 'content-type': 'text/plain' }, cors));
+    res.end('The game is not served from here. This address is the multiplayer server.');
     return;
   }
 
@@ -550,7 +554,8 @@ server.on('upgrade', (req, raw) => {
 server.listen(PORT, () => {
   console.log('');
   console.log('  Voxelia server: ' + NAME);
-  console.log('  players open:  http://localhost:' + PORT + '/');
+  console.log('  admin page:    http://localhost:' + PORT + '/');
+  console.log('  the game itself is served separately, from GitHub Pages');
   for (const [iface, addrs] of Object.entries(require('os').networkInterfaces())) {
     for (const a of addrs || []) {
       if (a.family === 'IPv4' && !a.internal) console.log('  on your network: http://' + a.address + ':' + PORT + '/   (' + iface + ')');
