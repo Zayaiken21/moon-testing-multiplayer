@@ -248,6 +248,17 @@ if (fs.existsSync(STATS_FILE)) {
   try { Object.assign(stats, JSON.parse(fs.readFileSync(STATS_FILE, 'utf8'))); } catch (e) {}
 }
 let statsDirty = false;
+/* a room nobody is in, or whose host walked out, does not linger */
+setInterval(() => {
+  const now = Date.now();
+  for (const [code, r] of rooms) {
+    if (r.players.size === 0 && (r.closed || (r.emptiedAt && now - r.emptiedAt > 120000))) {
+      rooms.delete(code);
+      console.log('Cleared room ' + code + '.');
+    }
+  }
+}, 30000);
+
 setInterval(() => {
   if (!statsDirty) return;
   statsDirty = false;
@@ -255,6 +266,14 @@ setInterval(() => {
 }, 10000);
 
 const dayKey = () => new Date().toISOString().slice(0, 10);
+
+const online = new Set();          // ids seen in the last couple of minutes
+function markOnline(id) { online.add(id); }
+function pruneOnline() {
+  let live = 0;
+  for (const r of rooms.values()) live += r.players.size;
+  return live;
+}
 
 function recordVisit(req, body) {
   const key = dayKey();
@@ -270,6 +289,13 @@ function recordVisit(req, body) {
                : /Android/.test(ua) ? 'Android' : /Macintosh/.test(ua) ? 'Mac'
                : /Windows/.test(ua) ? 'Windows' : /Linux/.test(ua) ? 'Linux' : 'other';
   stats.devices[device] = (stats.devices[device] || 0) + 1;
+  if (body && body.account) {
+    stats.players = stats.players || {};
+    const first = !stats.players[body.account];
+    stats.players[body.account] = { first: first ? new Date().toISOString()
+      : stats.players[body.account].first, last: new Date().toISOString(),
+      opens: (first ? 0 : stats.players[body.account].opens) + 1 };
+  }
   stats.sessions.unshift({
     at: new Date().toISOString(), device,
     from: host, mode: (body && body.mode) || 'unknown',
@@ -379,6 +405,11 @@ const server = http.createServer((req, res) => {
       wallet: {
         paid: ledger.paid, claimed: Object.keys(ledger.claimed).length,
         accounts: Object.keys(ledger.accounts).length, top: accounts, rates: RARITY_CENTS
+      },
+      lifetime: {
+        players: Object.keys(stats.players || {}).length,
+        onlineNow: pruneOnline(),
+        returning: Object.values(stats.players || {}).filter(p => p.opens > 1).length
       },
       total: stats.total, today: stats.today, firstSeen: stats.firstSeen,
       peakRooms: stats.peakRooms,

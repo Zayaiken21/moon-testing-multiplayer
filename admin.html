@@ -103,6 +103,9 @@ td.num{color:var(--glow);font-family:var(--display)}
     <div class="card"><small>Rooms open now</small><b id="rooms">—</b></div>
     <div class="card"><small>Players in rooms</small><b id="players">—</b></div>
     <div class="card"><small>Busiest ever</small><b id="peak">—</b></div>
+    <div class="card"><small>Players, lifetime</small><b id="life-players">—</b></div>
+    <div class="card"><small>Online right now</small><b id="life-online">—</b></div>
+    <div class="card"><small>Came back</small><b id="life-return">—</b></div>
   </div>
 
   <section>
@@ -184,6 +187,10 @@ function draw(d) {
   $('#rooms').textContent = fmt(open.length);
   $('#players').textContent = fmt(open.reduce((n, r) => n + r.players, 0));
   $('#peak').textContent = fmt(d.peakRooms);
+  const L = d.lifetime || {};
+  $('#life-players').textContent = fmt(L.players);
+  $('#life-online').textContent = fmt(L.onlineNow);
+  $('#life-return').textContent = fmt(L.returning);
 
   const max = Math.max(1, ...d.days.map(x => x.visits));
   $('#chart').innerHTML = d.days.map(x =>
