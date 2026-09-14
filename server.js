@@ -281,6 +281,24 @@ function recordVisit(req, body) {
   statsDirty = true;
 }
 
+/* ---------- a light rate limit, per address ---------- */
+const hits = new Map();          // ip -> { n, since }
+const LIMIT = 120;               // requests
+const WINDOW = 60000;            // per minute
+
+function overLimit(req) {
+  const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '')
+    .toString().split(',')[0].trim();
+  const now = Date.now();
+  let rec = hits.get(ip);
+  if (!rec || now - rec.since > WINDOW) { rec = { n: 0, since: now }; hits.set(ip, rec); }
+  rec.n++;
+  if (hits.size > 5000) {
+    for (const [k, v] of hits) if (now - v.since > WINDOW) hits.delete(k);
+  }
+  return rec.n > LIMIT;
+}
+
 /* ---------- HTTP ---------- */
 const server = http.createServer((req, res) => {
   const cors = {
@@ -289,6 +307,11 @@ const server = http.createServer((req, res) => {
     'access-control-allow-methods': 'GET,POST,OPTIONS'
   };
   if (req.method === 'OPTIONS') { res.writeHead(204, cors); res.end(); return; }
+  if (overLimit(req)) {
+    res.writeHead(429, Object.assign({ 'content-type': 'application/json', 'retry-after': '60' }, cors));
+    res.end(JSON.stringify({ error: 'Too many requests, try again in a minute.' }));
+    return;
+  }
   const url = req.url.split('?')[0];
   const json = (code, obj) => {
     res.writeHead(code, Object.assign({ 'content-type': 'application/json' }, cors));
@@ -336,6 +359,7 @@ const server = http.createServer((req, res) => {
   }
 
   if (url === '/rooms' || url === '/games') {
+    res.setHeader('cache-control', 'public, max-age=8');
     json(200, Array.from(rooms.values())
       .filter(r => r.public && !r.closed)
       .map(r => ({ code: r.code, name: r.name, seed: r.seed, mode: r.mode,
