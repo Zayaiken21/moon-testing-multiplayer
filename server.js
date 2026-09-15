@@ -238,6 +238,12 @@ function announce() {
 if (DIRECTORY) setInterval(announce, 30000);
 
 /* ---------- who is opening the game ---------- */
+const { GitHubStore } = require('./store-github');
+
+/* The record lives in a GitHub repo, not on Render's disk, because that disk is
+   wiped on every redeploy. Render reads it on boot and commits changes back. */
+const store = new GitHubStore({ localDir: __dirname, log: (m) => console.log('  store: ' + m) });
+
 const STATS_FILE = path.join(__dirname, 'stats.json');
 const ADMIN_KEY = opt('admin', process.env.ADMIN_KEY || 'voxelia');
 
@@ -245,9 +251,10 @@ const stats = {
   total: 0, today: 0, todayKey: '', days: {}, referrers: {}, devices: {},
   countries: {}, firstSeen: new Date().toISOString(), sessions: [], peakRooms: 0
 };
-if (fs.existsSync(STATS_FILE)) {
-  try { Object.assign(stats, JSON.parse(fs.readFileSync(STATS_FILE, 'utf8'))); } catch (e) {}
-}
+store.load('stats.json', null).then((saved) => {
+  if (saved) Object.assign(stats, saved);
+  console.log('  visits on record: ' + (stats.total || 0));
+});
 let statsDirty = false;
 /* a room nobody is in, or whose host walked out, does not linger */
 setInterval(() => {
@@ -263,7 +270,7 @@ setInterval(() => {
 setInterval(() => {
   if (!statsDirty) return;
   statsDirty = false;
-  fs.writeFile(STATS_FILE, JSON.stringify(stats), () => {});
+  store.save('stats.json', stats);
 }, 10000);
 
 const dayKey = () => new Date().toISOString().slice(0, 10);
@@ -346,15 +353,27 @@ const ledger = {
   claimed: {},         // creatureKey -> { account, at, cents }
   paid: 0
 };
-if (fs.existsSync(LEDGER_FILE)) {
-  try { Object.assign(ledger, JSON.parse(fs.readFileSync(LEDGER_FILE, 'utf8'))); } catch (e) {}
-}
+store.load('ledger.json', null).then((saved) => {
+  if (saved) Object.assign(ledger, saved);
+  console.log('  accounts on record: ' + Object.keys(ledger.accounts || {}).length);
+});
 let ledgerDirty = false;
 setInterval(() => {
   if (!ledgerDirty) return;
   ledgerDirty = false;
-  fs.writeFile(LEDGER_FILE, JSON.stringify(ledger), () => {});
+  store.save('ledger.json', ledger);
 }, 8000);
+
+/* a redeploy should not lose the last minute of play */
+for (const sig of ['SIGTERM', 'SIGINT']) {
+  process.on(sig, async () => {
+    console.log('  shutting down, saving first...');
+    store.save('stats.json', stats);
+    store.save('ledger.json', ledger);
+    await store.flushAll();
+    process.exit(0);
+  });
+}
 
 /* what a creature is worth, decided here so the client cannot argue */
 const RARITY_CENTS = { common: 1, uncommon: 3, rare: 8, exotic: 15, legendary: 25 };
