@@ -1,12 +1,33 @@
 services:
   - type: web
-    name: voxelia
-    runtime: node
+    name: voxelia-multiplayer
+    env: node
     plan: free
-    # there is nothing to compile, but Render insists on a real command
+    region: oregon
+    branch: main
     buildCommand: npm install
     startCommand: npm start
     healthCheckPath: /rooms
     envVars:
+      # The key you type once on the admin page. Pick anything long.
+      - key: ADMIN_KEY
+        sync: false
+
+      # A fine grained personal access token with Contents: read and write,
+      # scoped to the data repo only. Render keeps it secret.
+      - key: GITHUB_TOKEN
+        sync: false
+
+      # Where the numbers are kept. Make this a DIFFERENT repo from this one,
+      # or every save will trigger a redeploy.
+      - key: GITHUB_REPO
+        value: zayaiken21/voxelia-data
+
+      - key: GITHUB_BRANCH
+        value: main
+
+      - key: GITHUB_DATA_DIR
+        value: data
+
       - key: NODE_VERSION
-        value: "20.11.1"
+        value: 20.11.1
