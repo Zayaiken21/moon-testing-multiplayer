@@ -106,6 +106,9 @@ td.num{color:var(--glow);font-family:var(--display)}
     <div class="card"><small>Players, lifetime</small><b id="life-players">—</b></div>
     <div class="card"><small>Online right now</small><b id="life-online">—</b></div>
     <div class="card"><small>Came back</small><b id="life-return">—</b></div>
+    <div class="card"><small>Playing alone</small><b id="life-solo">—</b></div>
+    <div class="card"><small>Hours played</small><b id="life-hours">—</b></div>
+    <div class="card"><small>Average session</small><b id="life-avg">—</b></div>
   </div>
 
   <section>
@@ -191,6 +194,9 @@ function draw(d) {
   $('#life-players').textContent = fmt(L.players);
   $('#life-online').textContent = fmt(L.onlineNow);
   $('#life-return').textContent = fmt(L.returning);
+  $('#life-solo').textContent = fmt(L.playingAlone);
+  $('#life-hours').textContent = fmt(L.hours);
+  $('#life-avg').textContent = (L.avgMinutes || 0) + ' min';
 
   const max = Math.max(1, ...d.days.map(x => x.visits));
   $('#chart').innerHTML = d.days.map(x =>

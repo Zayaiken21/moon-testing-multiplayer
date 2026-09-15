@@ -268,12 +268,40 @@ setInterval(() => {
 
 const dayKey = () => new Date().toISOString().slice(0, 10);
 
-const online = new Set();          // ids seen in the last couple of minutes
-function markOnline(id) { online.add(id); }
-function pruneOnline() {
-  let live = 0;
-  for (const r of rooms.values()) live += r.players.size;
-  return live;
+/* Who is playing right now, in a room or alone.
+   Clients send a heartbeat once a minute; anyone quiet for three is gone. */
+const heartbeats = new Map();     // account -> { at, mode, minutes }
+const ALIVE_MS = 180000;
+
+function markAlive(acc, mode) {
+  if (!acc) return;
+  const now = Date.now();
+  const was = heartbeats.get(acc);
+  const rec = was || { at: now, mode, minutes: 0, since: now };
+  // a heartbeat within the window means another minute of play
+  if (was && now - was.at < ALIVE_MS) rec.minutes += (now - was.at) / 60000;
+  else rec.since = now;
+  rec.at = now;
+  rec.mode = mode || rec.mode;
+  heartbeats.set(acc, rec);
+  stats.minutes = (stats.minutes || 0) + (was && now - was.at < ALIVE_MS ? (now - was.at) / 60000 : 0);
+  stats.players = stats.players || {};
+  if (stats.players[acc]) stats.players[acc].minutes = Math.round(rec.minutes);
+  statsDirty = true;
+}
+
+function livePlayers() {
+  const now = Date.now();
+  let solo = 0;
+  const seen = new Set();
+  for (const [acc, h] of heartbeats) {
+    if (now - h.at > ALIVE_MS) { heartbeats.delete(acc); continue; }
+    seen.add(acc);
+    solo++;
+  }
+  let inRooms = 0;
+  for (const r of rooms.values()) inRooms += r.players.size;
+  return { total: Math.max(solo, inRooms), solo, inRooms, sessions: seen.size };
 }
 
 function recordVisit(req, body) {
@@ -390,7 +418,14 @@ const server = http.createServer((req, res) => {
       const [k, v] = pair.split('=');
       if (k) params[k] = decodeURIComponent(v || '');
     });
+    if (params.mode === 'alive') {
+      markAlive(params.account, params.play || 'survival');
+      res.writeHead(200, Object.assign({ 'content-type': 'image/gif', 'cache-control': 'no-store' }, cors));
+      res.end(Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64'));
+      return;
+    }
     recordVisit(req, params);
+    markAlive(params.account, params.play || 'survival');
     res.writeHead(200, Object.assign({ 'content-type': 'image/gif', 'cache-control': 'no-store' }, cors));
     // a one pixel answer, so it can also be used as an image if fetch is blocked
     res.end(Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64'));
@@ -421,11 +456,21 @@ const server = http.createServer((req, res) => {
         paid: ledger.paid, claimed: Object.keys(ledger.claimed).length,
         accounts: Object.keys(ledger.accounts).length, top: accounts, rates: RARITY_CENTS
       },
-      lifetime: {
-        players: Object.keys(stats.players || {}).length,
-        onlineNow: pruneOnline(),
-        returning: Object.values(stats.players || {}).filter(p => p.opens > 1).length
-      },
+      lifetime: (() => {
+        const live = livePlayers();
+        const ps = Object.values(stats.players || {});
+        const mins = Math.round(stats.minutes || 0);
+        return {
+          players: ps.length,
+          onlineNow: live.total,
+          playingAlone: live.solo - live.inRooms > 0 ? live.solo - live.inRooms : 0,
+          inRooms: live.inRooms,
+          returning: ps.filter(p => p.opens > 1).length,
+          minutes: mins,
+          hours: Math.round(mins / 60),
+          avgMinutes: ps.length ? Math.round(mins / ps.length) : 0
+        };
+      })(),
       total: stats.total, today: stats.today, firstSeen: stats.firstSeen,
       peakRooms: stats.peakRooms,
       days: days.map(d => ({ day: d, visits: stats.days[d] })),
