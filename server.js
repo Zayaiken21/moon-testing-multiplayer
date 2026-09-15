@@ -383,6 +383,20 @@ const server = http.createServer((req, res) => {
     res.end(JSON.stringify(obj));
   };
 
+  if (url === '/visit' && req.method === 'GET') {
+    const q = req.url.split('?')[1] || '';
+    const params = {};
+    q.split('&').forEach(pair => {
+      const [k, v] = pair.split('=');
+      if (k) params[k] = decodeURIComponent(v || '');
+    });
+    recordVisit(req, params);
+    res.writeHead(200, Object.assign({ 'content-type': 'image/gif', 'cache-control': 'no-store' }, cors));
+    // a one pixel answer, so it can also be used as an image if fetch is blocked
+    res.end(Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64'));
+    return;
+  }
+
   if (url === '/visit') {
     let body = '';
     req.on('data', c => { body += c; if (body.length > 2048) req.destroy(); });
@@ -390,7 +404,7 @@ const server = http.createServer((req, res) => {
       let parsed = {};
       try { parsed = JSON.parse(body || '{}'); } catch (e) {}
       recordVisit(req, parsed);
-      json(200, { ok: true });
+      json(200, { ok: true, counted: stats.total });
     });
     return;
   }
@@ -468,6 +482,37 @@ const server = http.createServer((req, res) => {
       ledger.paid += cents;
       ledgerDirty = true;
       json(200, { ok: true, cents, balance: a.balance, caught: a.caught, rarity });
+    });
+    return;
+  }
+
+  /* an account's companions, kept here so an update to the game cannot lose them */
+  if (url.startsWith('/companions') && req.method === 'GET') {
+    const acc = (req.url.split('account=')[1] || '').split('&')[0];
+    if (!acc) { json(400, { error: 'account required' }); return; }
+    const a = account(decodeURIComponent(acc).slice(0, 64));
+    json(200, { companions: a.companions || [], balance: a.balance, caught: a.caught });
+    return;
+  }
+
+  if (url === '/companions' && req.method === 'POST') {
+    let body = '';
+    req.on('data', c => { body += c; if (body.length > 65536) req.destroy(); });
+    req.on('end', () => {
+      let m = {};
+      try { m = JSON.parse(body || '{}'); } catch (e) {}
+      const acc = String(m.account || '').slice(0, 64);
+      if (!acc || !Array.isArray(m.companions)) { json(400, { error: 'account and companions required' }); return; }
+      const a = account(acc);
+      // names and species only: nothing here decides money
+      a.companions = m.companions.slice(0, 500).map(c => ({
+        key: String(c.key || '').slice(0, 120),
+        species: String(c.species || '').slice(0, 40),
+        name: String(c.name || '').slice(0, 24),
+        since: c.since || Date.now()
+      }));
+      ledgerDirty = true;
+      json(200, { ok: true, kept: a.companions.length });
     });
     return;
   }
@@ -671,6 +716,14 @@ server.on('upgrade', (req, raw) => {
       broadcast({ t: 'vehicle', id: vid, item: v.item, x: v.x, y: v.y, z: v.z, yaw: v.yaw,
                   lights: v.lights, seats: v.seats, driver: v.driver, riders: v.riders }, id);
 
+    } else if (m.t === 'offer' || m.t === 'offer-reply') {
+      // a companion changing hands: passed straight to the one person it is for
+      const target = room.players.get(String(m.to || ''));
+      if (target) {
+        target.socket.send(JSON.stringify(Object.assign({}, m, { id, name: player.name })));
+      }
+    } else if (m.t === 'rope') {
+      broadcast({ t: 'rope', id: m.id, out: !!m.out, length: m.length || 12 }, id);
     } else if (m.t === 'board') {
       const v = room.vehicles.get(String(m.id || ''));
       if (!v) { sock.send(JSON.stringify({ t: 'seat', id: m.id, ok: false, why: 'gone' })); return; }
