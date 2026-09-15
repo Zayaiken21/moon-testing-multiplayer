@@ -62,6 +62,7 @@ function createRoom(opts) {
     edits: new Map(),
     players: new Map(),
     spots: new Map(),          // name -> where they last were
+    vehicles: new Map(),       // id -> the one true record of every craft
     host: null,
     vehicles: new Map(),
     time: 0.28,
@@ -585,6 +586,7 @@ server.on('upgrade', (req, raw) => {
     sock.send(JSON.stringify({
       t: 'welcome', you: id, room: room.code, serverName: room.name,
       resume: spot,
+      vehicles: Array.from(room.vehicles.values()),
       host: room.host === id,
       seed: room.seed, mode: room.mode, max: room.max,
       edits: Array.from(room.edits, ([k, v]) => [k, v]),
@@ -649,9 +651,51 @@ server.on('upgrade', (req, raw) => {
       room.dirty = true;
       broadcast({ t: 'edit', id, x: m.x | 0, y: m.y | 0, z: m.z | 0, b: m.b | 0 }, id);
     } else if (m.t === 'vehicle') {
-      if (m.gone) room.vehicles.delete(m.id);
-      else room.vehicles.set(m.id, { id: m.id, item: m.item, x: m.x, y: m.y, z: m.z, yaw: m.yaw, lights: !!m.lights });
-      broadcast({ t: 'vehicle', id: m.id, item: m.item, x: m.x, y: m.y, z: m.z, yaw: m.yaw, lights: m.lights, gone: m.gone }, id);
+      // one record per craft, kept here, so nobody can end up with a copy
+      const vid = String(m.id || '').slice(0, 40);
+      if (!vid) return;
+      if (m.gone) {
+        room.vehicles.delete(vid);
+        broadcast({ t: 'vehicle', id: vid, gone: true });
+        return;
+      }
+      let v = room.vehicles.get(vid);
+      if (!v) {
+        v = { id: vid, item: m.item, seats: Math.max(1, Math.min(24, m.seats || 2)),
+              driver: null, riders: [] };
+        room.vehicles.set(vid, v);
+      }
+      // only the driver may move it
+      if (v.driver && v.driver !== id) return;
+      v.x = m.x; v.y = m.y; v.z = m.z; v.yaw = m.yaw; v.lights = m.lights;
+      broadcast({ t: 'vehicle', id: vid, item: v.item, x: v.x, y: v.y, z: v.z, yaw: v.yaw,
+                  lights: v.lights, seats: v.seats, driver: v.driver, riders: v.riders }, id);
+
+    } else if (m.t === 'board') {
+      const v = room.vehicles.get(String(m.id || ''));
+      if (!v) { sock.send(JSON.stringify({ t: 'seat', id: m.id, ok: false, why: 'gone' })); return; }
+      if (v.riders.indexOf(id) < 0) {
+        if (v.riders.length >= v.seats) {
+          sock.send(JSON.stringify({ t: 'seat', id: v.id, ok: false, why: 'full' }));
+          return;
+        }
+        v.riders.push(id);
+      }
+      // first one aboard drives; everyone after rides
+      if (!v.driver) v.driver = id;
+      const seat = v.riders.indexOf(id);
+      broadcast({ t: 'seat', id: v.id, ok: true, who: id, seat,
+                  driver: v.driver, riders: v.riders, item: v.item,
+                  x: v.x, y: v.y, z: v.z, yaw: v.yaw });
+
+    } else if (m.t === 'unboard') {
+      const v = room.vehicles.get(String(m.id || ''));
+      if (!v) return;
+      v.riders = v.riders.filter(r => r !== id);
+      if (v.driver === id) v.driver = v.riders[0] || null;   // the wheel passes on
+      broadcast({ t: 'seat', id: v.id, ok: true, who: id, left: true,
+                  driver: v.driver, riders: v.riders });
+
     } else if (m.t === 'realm') {
       player.realm = String(m.realm || 'ground').slice(0, 32);
       broadcast({ t: 'realm', id, realm: player.realm }, id);
@@ -680,6 +724,13 @@ server.on('upgrade', (req, raw) => {
     if (!room) return;
     const player = room.players.get(id);
     if (!player) return;
+    for (const v of room.vehicles.values()) {
+      if (v.riders.indexOf(id) < 0) continue;
+      v.riders = v.riders.filter(r => r !== id);
+      if (v.driver === id) v.driver = v.riders[0] || null;
+      broadcast({ t: 'seat', id: v.id, ok: true, who: id, left: true,
+                  driver: v.driver, riders: v.riders });
+    }
     room.spots.set(player.name, { x: player.x, y: player.y, z: player.z, yaw: player.yaw });
     room.players.delete(id);
     broadcast({ t: 'leave', id });
