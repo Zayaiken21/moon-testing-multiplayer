@@ -29,5 +29,13 @@ services:
       - key: GITHUB_DATA_DIR
         value: data
 
+      # Supabase. One project, or several separated by commas to shard.
+      # The SERVICE key, never the anon key: it is what lets the server write
+      # balances, and it must never appear in the game page.
+      - key: SUPABASE_URLS
+        value: https://oxmjxuuymplhnbcdltho.supabase.co
+      - key: SUPABASE_SERVICE_KEYS
+        sync: false
+
       - key: NODE_VERSION
         value: 20.11.1

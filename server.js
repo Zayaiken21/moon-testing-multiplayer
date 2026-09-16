@@ -239,6 +239,12 @@ if (DIRECTORY) setInterval(announce, 30000);
 
 /* ---------- who is opening the game ---------- */
 const { GitHubStore } = require('./store-github');
+const { Accounts } = require('./accounts');
+
+/* Real accounts live in Supabase; GitHub keeps a snapshot so Supabase is never
+   the only copy. Nothing about money is decided in a browser. */
+const accounts = new Accounts({ log: (m) => console.log('  accounts: ' + m) });
+const pendingResets = [];        // shown on the admin page until email is wired up
 
 /* The record lives in a GitHub repo, not on Render's disk, because that disk is
    wiped on every redeploy. Render reads it on boot and commits changes back. */
@@ -463,6 +469,47 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  if (url.startsWith('/admin/accounts')) {
+    const key = (req.url.split('key=')[1] || '').split('&')[0];
+    if (key !== ADMIN_KEY) { json(401, { error: 'wrong key' }); return; }
+
+    if (req.method === 'POST') {
+      let body = '';
+      req.on('data', c => { body += c; if (body.length > 4096) req.destroy(); });
+      req.on('end', async () => {
+        let m = {}; try { m = JSON.parse(body || '{}'); } catch (e) {}
+        if (m.action === 'delete') { json(200, await accounts.remove(m.id)); return; }
+        if (m.action === 'subscribe') { json(200, await accounts.setSubscription(m.id, !!m.on, m.until)); return; }
+        if (m.action === 'create') {
+          const made = await accounts.signUp({
+            email: m.email, username: m.username, password: m.password || 'testerpass1'
+          });
+          if (made.ok) {
+            const a = await accounts.find(made.account.id);
+            a.role = m.role || 'tester';
+            if (m.subscribed) { a.subscribed = true; }
+            await accounts.put(a);
+            made.account = accounts.publicView(a);
+          }
+          json(200, made);
+          return;
+        }
+        json(400, { error: 'unknown action' });
+      });
+      return;
+    }
+
+    (async () => {
+      json(200, {
+        accounts: await accounts.list(100),
+        resets: pendingResets.slice(0, 20),
+        rates: { perCreature: 1, freeDaily: 5, memberDaily: 25 },
+        supabase: accounts.enabled ? accounts.shards.length + ' project(s)' : 'not configured'
+      });
+    })();
+    return;
+  }
+
   if (url === '/admin/data') {
     const key = (req.url.split('key=')[1] || '').split('&')[0];
     if (key !== ADMIN_KEY) { json(401, { error: 'wrong key' }); return; }
@@ -607,6 +654,54 @@ const server = http.createServer((req, res) => {
       rec.transfers = (rec.transfers || 0) + 1;
       ledgerDirty = true;             // the payout does not move with it
       json(200, { ok: true, paidTo: rec.account, owner: to, note: 'Ownership moved; no further payment.' });
+    });
+    return;
+  }
+
+  /* ---------------- accounts ---------------- */
+  const readBody = (cb) => {
+    let body = '';
+    req.on('data', c => { body += c; if (body.length > 8192) req.destroy(); });
+    req.on('end', () => { let m = {}; try { m = JSON.parse(body || '{}'); } catch (e) {} cb(m); });
+  };
+
+  if (url === '/account/signup' && req.method === 'POST') {
+    readBody(async (m) => json(200, await accounts.signUp(m)));
+    return;
+  }
+  if (url === '/account/signin' && req.method === 'POST') {
+    readBody(async (m) => json(200, await accounts.signIn(m)));
+    return;
+  }
+  if (url === '/account/forgot' && req.method === 'POST') {
+    readBody(async (m) => {
+      const out = await accounts.beginReset(m.email);
+      // the token is not emailed yet: it is handed to the admin page instead
+      if (out.token) pendingResets.unshift({ email: String(m.email || '').toLowerCase(), token: out.token, at: Date.now() });
+      if (pendingResets.length > 50) pendingResets.length = 50;
+      json(200, { ok: true, sent: true });   // the same answer whether or not the email exists
+    });
+    return;
+  }
+  if (url === '/account/reset' && req.method === 'POST') {
+    readBody(async (m) => json(200, await accounts.completeReset(m.token, m.password)));
+    return;
+  }
+  if (url.startsWith('/account/me')) {
+    const t = (req.url.split('session=')[1] || '').split('&')[0];
+    (async () => {
+      const id = accounts.sessionAccount(decodeURIComponent(t || ''));
+      if (!id) { json(401, { error: 'not signed in' }); return; }
+      const a = await accounts.find(id);
+      json(200, a ? accounts.publicView(a) : { error: 'gone' });
+    })();
+    return;
+  }
+  if (url === '/account/companions' && req.method === 'POST') {
+    readBody(async (m) => {
+      const id = accounts.sessionAccount(m.session);
+      if (!id) { json(401, { error: 'not signed in' }); return; }
+      json(200, await accounts.setCompanions(id, m.companions));
     });
     return;
   }
