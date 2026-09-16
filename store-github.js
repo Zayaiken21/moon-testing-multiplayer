@@ -30,7 +30,9 @@ class GitHubStore {
   constructor(opts = {}) {
     this.repo = opts.repo || process.env.GITHUB_REPO || '';
     this.token = opts.token || process.env.GITHUB_TOKEN || '';
-    this.branch = opts.branch || process.env.GITHUB_BRANCH || 'main';
+    // a separate branch of the same repo, so there is no third repository and no
+    // redeploy when the numbers change: Render only watches main
+    this.branch = opts.branch || process.env.GITHUB_BRANCH || 'voxelia-data';
     this.dir = (opts.dir || process.env.GITHUB_DATA_DIR || 'data').replace(/^\/|\/$/g, '');
     this.local = opts.localDir || __dirname;
     this.host = opts.host || API;

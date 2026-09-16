@@ -18,13 +18,13 @@ services:
       - key: GITHUB_TOKEN
         sync: false
 
-      # Where the numbers are kept. Make this a DIFFERENT repo from this one,
-      # or every save will trigger a redeploy.
+      # This repo. The numbers go on their own branch, not on main, so saving
+      # them never triggers a redeploy. Only two repositories in total.
       - key: GITHUB_REPO
-        value: zayaiken21/voxelia-data
+        value: zayaiken21/voxelia-server
 
       - key: GITHUB_BRANCH
-        value: main
+        value: voxelia-data
 
       - key: GITHUB_DATA_DIR
         value: data
