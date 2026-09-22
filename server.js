@@ -803,6 +803,9 @@ server.on('upgrade', (req, raw) => {
     broadcast({ t: 'join', id, name: player.name, skin: player.skin }, id);
     // tell the newcomer who is already here, so voice can be dialled up
     sock.send(JSON.stringify({ t: 'roster', players: Array.from(room.players.keys()).filter(p => p !== id) }));
+    for (const [pid, other] of room.players) {
+      if (pid !== id && other.avatar) sock.send(JSON.stringify({ t: 'avatar', id: pid, avatar: other.avatar }));
+    }
     console.log(player.name + ' entered room ' + room.code + ' (' + room.players.size + '/' + room.max + ')');
   };
 
@@ -843,12 +846,25 @@ server.on('upgrade', (req, raw) => {
     const player = room.players.get(id);
     if (!player) return;
 
+    if (m.t === 'avatar') {
+      // a compact, checked description of how a player looks: never geometry
+      const ok = (v) => typeof v === 'string' && /^[a-z0-9_]{3,40}$/.test(v);
+      const hex = (v) => typeof v === 'string' && /^#[0-9a-fA-F]{6}$/.test(v);
+      const a = m.avatar || {};
+      if (!ok(a.presetId)) return;
+      const colors = {};
+      for (const k of Object.keys(a.colors || {}).slice(0, 16)) if (hex(a.colors[k])) colors[k] = a.colors[k];
+      player.avatar = { presetId: a.presetId, colors, options: { glasses: !!(a.options && a.options.glasses) } };
+      broadcast({ t: 'avatar', id, avatar: player.avatar }, id);
+      return;
+    }
     if (m.t === 'move') {
       player.x = m.x; player.y = m.y; player.z = m.z; player.yaw = m.yaw;
       room.spots.set(player.name, { x: m.x, y: m.y, z: m.z, yaw: m.yaw });
       if (m.realm) player.realm = String(m.realm).slice(0, 32);
       broadcast({ t: 'move', id, name: player.name, skin: player.skin, x: m.x, y: m.y, z: m.z,
-                  yaw: m.yaw, riding: m.riding || null, realm: player.realm || 'ground' }, id);
+                  yaw: m.yaw, riding: m.riding || null, realm: player.realm || 'ground',
+                  anim: typeof m.anim === 'number' ? (m.anim & 31) : 0 }, id);
     } else if (m.t === 'edit') {
       if (!Number.isFinite(m.x) || !Number.isFinite(m.y) || !Number.isFinite(m.z)) return;
       room.edits.set((m.x | 0) + ',' + (m.y | 0) + ',' + (m.z | 0), m.b | 0);
