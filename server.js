@@ -104,7 +104,10 @@ setInterval(() => {
       room.weatherIn = 120 + Math.random() * 180;
       for (const p of room.players.values()) p.socket.send(JSON.stringify({ t: 'weather', weather: room.weather }));
     }
-    const msg = JSON.stringify({ t: 'time', time: room.time });
+    /* The weather rides along with the clock rather than only being sent when
+       it changes: a dropped packet used to leave one player in the rain and
+       everyone else in sunshine, which is why one screen was darker. */
+    const msg = JSON.stringify({ t: 'time', time: room.time, weather: room.weather || 'clear' });
     for (const p of room.players.values()) p.socket.send(msg);
   }
 }, 2000);
@@ -798,7 +801,8 @@ server.on('upgrade', (req, raw) => {
       vehicles: Array.from(room.vehicles.values()),
       weather: room.weather || 'clear',
       players: Array.from(room.players.values()).filter(p => p.id !== id)
-        .map(p => ({ id: p.id, name: p.name, skin: p.skin, x: p.x, y: p.y, z: p.z, yaw: p.yaw }))
+        .map(p => ({ id: p.id, name: p.name, skin: p.skin, x: p.x, y: p.y, z: p.z, yaw: p.yaw,
+                     realm: p.realm || 'ground' }))
     }));
     broadcast({ t: 'join', id, name: player.name, skin: player.skin }, id);
     // tell the newcomer who is already here, so voice can be dialled up
@@ -924,6 +928,18 @@ server.on('upgrade', (req, raw) => {
       broadcast({ t: 'seat', id: v.id, ok: true, who: id, left: true,
                   driver: v.driver, riders: v.riders });
 
+    } else if (m.t === 'life' || m.t === 'herd') {
+      /* The wildlife belongs to the host. Passing on anyone else's version
+         would put two answers in the room, which is the thing this is for. */
+      if (room.host !== id) return;
+      if (m.t === 'life') {
+        const add = Array.isArray(m.add) ? m.add.slice(0, 220) : [];
+        if (add.length) broadcast({ t: 'life', add }, id);
+      } else {
+        const a = Array.isArray(m.a) ? m.a.slice(0, 120) : [];
+        if (a.length) broadcast({ t: 'herd', a }, id);
+      }
+
     } else if (m.t === 'realm') {
       player.realm = String(m.realm || 'ground').slice(0, 32);
       broadcast({ t: 'realm', id, realm: player.realm }, id);
@@ -934,6 +950,17 @@ server.on('upgrade', (req, raw) => {
       for (const c of crew) {
         const cp = room.players.get(c);
         if (cp) cp.realm = realm;
+      }
+      // the craft has left the ground with them, so nobody is still in a seat:
+      // leaving them recorded as riders kept their bodies hidden on arrival
+      for (const v of room.vehicles.values()) {
+        const before = v.riders.length;
+        v.riders = v.riders.filter(r => crew.indexOf(r) < 0);
+        if (v.driver && crew.indexOf(v.driver) >= 0) v.driver = v.riders[0] || null;
+        if (v.riders.length !== before) {
+          broadcast({ t: 'seat', id: v.id, ok: true, who: null, left: true,
+                      driver: v.driver, riders: v.riders });
+        }
       }
       broadcast({ t: 'crew', realm, planet: m.planet, crew, site: m.site || null });
     } else if (m.t === 'signal') {
