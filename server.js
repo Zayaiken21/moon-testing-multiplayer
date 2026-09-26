@@ -112,6 +112,66 @@ setInterval(() => {
   }
 }, 2000);
 
+/* ---------------------------------------------------------------
+   The movement tick.
+
+   Everyone's position goes out together, twenty times a second, in a single
+   message per player rather than one message per player per player. In a room
+   of eight that is eight messages a tick instead of fifty-six, and each one
+   is a short list of numbers rather than eight copies of everybody's outfit.
+
+   A player who has not moved is left out, so a room standing still costs
+   nothing at all.
+   --------------------------------------------------------------- */
+const MOVE_HZ = 20;
+let realmBeat = 0;
+setInterval(() => {
+  realmBeat++;
+  for (const room of rooms.values()) {
+    if (room.players.size < 2) {            // nobody to tell
+      for (const p of room.players.values()) p.moved = false;
+      continue;
+    }
+    const a = [];
+    for (const p of room.players.values()) {
+      if (!p.moved) continue;
+      p.moved = false;
+      a.push([p.id,
+              Math.round(p.x * 100) / 100,
+              Math.round(p.y * 100) / 100,
+              Math.round(p.z * 100) / 100,
+              Math.round(p.yaw * 1000) / 1000,
+              p.anim | 0,
+              p.riding || 0]);
+    }
+    if (a.length) {
+      const msg = JSON.stringify({ t: 'ms', a });
+      const onlyMover = a.length === 1 ? a[0][0] : null;
+      for (const p of room.players.values()) {
+        // no point telling somebody only about themselves
+        if (onlyMover === p.id) continue;
+        p.socket.send(msg);
+      }
+    }
+    /* Who is on which world. A realm message can be missed, and a missed one
+       leaves somebody drawn on the wrong planet for good, so the whole picture
+       goes out whenever it changes and once every ten seconds as a repair.
+       A room where nobody is travelling says nothing at all. */
+    if (realmBeat % 10 === 0) {
+      const r = [];
+      for (const p of room.players.values()) r.push([p.id, p.realm || 'ground']);
+      const stamp = JSON.stringify(r);
+      const stale = !room.realmsAt || Date.now() - room.realmsAt > 10000;
+      if (stamp !== room.realmsStamp || stale) {
+        room.realmsStamp = stamp;
+        room.realmsAt = Date.now();
+        const msg = JSON.stringify({ t: 'realms', r });
+        for (const p of room.players.values()) p.socket.send(msg);
+      }
+    }
+  }
+}, Math.round(1000 / MOVE_HZ));
+
 setInterval(() => {
   for (const room of rooms.values()) {
     saveRoom(room);
@@ -862,13 +922,38 @@ server.on('upgrade', (req, raw) => {
       broadcast({ t: 'avatar', id, avatar: player.avatar }, id);
       return;
     }
-    if (m.t === 'move') {
-      player.x = m.x; player.y = m.y; player.z = m.z; player.yaw = m.yaw;
-      room.spots.set(player.name, { x: m.x, y: m.y, z: m.z, yaw: m.yaw });
-      if (m.realm) player.realm = String(m.realm).slice(0, 32);
-      broadcast({ t: 'move', id, name: player.name, skin: player.skin, x: m.x, y: m.y, z: m.z,
-                  yaw: m.yaw, riding: m.riding || null, realm: player.realm || 'ground',
-                  anim: typeof m.anim === 'number' ? (m.anim & 31) : 0 }, id);
+    if (m.t === 'move' || m.t === 'm') {
+      /* Where somebody is.
+
+         This used to go straight back out as its own message to every other
+         player, carrying their name and their whole outfit thirty times a
+         second: in a room of eight that was four hundred kilobytes a second
+         leaving the server, and the jerking everyone complained about was the
+         queue behind it. Now a move is only recorded here, and once every
+         fiftieth of a second the room gets ONE message with everybody's
+         position in it. Name and outfit are sent when they change, not with
+         every step.
+
+         'm' is the packed form: [x, y, z, yaw, anim, riding].              */
+      let x, y, z, yaw, anim, riding;
+      if (m.t === 'm') {
+        const a = m.a;
+        if (!Array.isArray(a) || a.length < 4) return;
+        x = a[0]; y = a[1]; z = a[2]; yaw = a[3];
+        anim = a[4] | 0; riding = a[5] || null;
+      } else {
+        x = m.x; y = m.y; z = m.z; yaw = m.yaw;
+        anim = typeof m.anim === 'number' ? m.anim : 0;
+        riding = m.riding || null;
+        if (m.realm) player.realm = String(m.realm).slice(0, 32);
+      }
+      if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return;
+      player.x = x; player.y = y; player.z = z; player.yaw = Number.isFinite(yaw) ? yaw : 0;
+      player.anim = anim & 31;
+      player.riding = riding ? String(riding).slice(0, 40) : null;
+      player.moved = true;
+      room.spots.set(player.name, { x, y, z, yaw: player.yaw });
+
     } else if (m.t === 'edit') {
       if (!Number.isFinite(m.x) || !Number.isFinite(m.y) || !Number.isFinite(m.z)) return;
       room.edits.set((m.x | 0) + ',' + (m.y | 0) + ',' + (m.z | 0), m.b | 0);
@@ -939,6 +1024,30 @@ server.on('upgrade', (req, raw) => {
         const a = Array.isArray(m.a) ? m.a.slice(0, 120) : [];
         if (a.length) broadcast({ t: 'herd', a }, id);
       }
+
+    } else if (m.t === 'mode') {
+      /* The host decides how the room plays. Everyone follows, so one player
+         cannot be flying about in creative while the others are mining. */
+      if (room.host !== id) return;
+      room.mode = m.mode === 'creative' ? 'creative' : 'survival';
+      room.dirty = true;
+      const msg = JSON.stringify({ t: 'mode', mode: room.mode });
+      for (const p of room.players.values()) p.socket.send(msg);
+
+    } else if (m.t === 'look') {
+      /* What somebody is wearing. Sent when it changes rather than with every
+         step, which is what made every movement packet six times its size. */
+      const raw = m.skin && typeof m.skin === 'object' ? m.skin : null;
+      if (!raw) return;
+      const hex = (v) => typeof v === 'string' && /^#[0-9a-fA-F]{6}$/.test(v);
+      const skin = {};
+      for (const k of ['head', 'torso', 'arms', 'legs', 'hair', 'accent']) if (hex(raw[k])) skin[k] = raw[k];
+      if (typeof raw.name === 'string') skin.name = raw.name.replace(/[<>&"']/g, '').slice(0, 24);
+      if (typeof raw.body === 'string') skin.body = raw.body.slice(0, 12);
+      for (const k of ['goggles', 'scuba', 'jetpack']) skin[k] = !!raw[k];
+      player.skin = skin;
+      if (skin.name) player.name = skin.name;
+      broadcast({ t: 'look', id, skin }, id);
 
     } else if (m.t === 'realm') {
       player.realm = String(m.realm || 'ground').slice(0, 32);
