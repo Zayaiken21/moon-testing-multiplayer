@@ -124,6 +124,11 @@ setInterval(() => {
    nothing at all.
    --------------------------------------------------------------- */
 const MOVE_HZ = 20;
+/* Above this many players in one room, each person is only told about the
+   ones near them. NEAR_RANGE is in blocks and is comfortably past how far
+   anyone can see. */
+const NEAR_FROM = 24;
+const NEAR_RANGE = 220;
 let realmBeat = 0;
 setInterval(() => {
   realmBeat++;
@@ -145,19 +150,41 @@ setInterval(() => {
               p.riding || 0]);
     }
     if (a.length) {
-      const msg = JSON.stringify({ t: 'ms', a });
-      const onlyMover = a.length === 1 ? a[0][0] : null;
-      for (const p of room.players.values()) {
-        // no point telling somebody only about themselves
-        if (onlyMover === p.id) continue;
-        p.socket.send(msg);
+      /* A big room only sends you the people near you.
+
+         Telling everybody about everybody is fine for eight and hopeless for
+         hundreds: the work grows with the square of the room. Past a couple
+         of dozen players the list is cut down per person to those within
+         sight, which keeps the cost flat however many join. */
+      if (room.players.size <= NEAR_FROM) {
+        const msg = JSON.stringify({ t: 'ms', a });
+        const onlyMover = a.length === 1 ? a[0][0] : null;
+        for (const p of room.players.values()) {
+          if (onlyMover === p.id) continue;      // no point telling them about themselves
+          p.socket.send(msg);
+        }
+      } else {
+        for (const p of room.players.values()) {
+          const mine = [];
+          for (const row of a) {
+            if (row[0] === p.id) continue;
+            const o = room.players.get(row[0]);
+            if (!o) continue;
+            if ((o.realm || 'ground') !== (p.realm || 'ground')) continue;
+            const dx = o.x - p.x, dz = o.z - p.z;
+            if (dx * dx + dz * dz > NEAR_RANGE * NEAR_RANGE) continue;
+            mine.push(row);
+            if (mine.length >= 40) break;
+          }
+          if (mine.length) p.socket.send(JSON.stringify({ t: 'ms', a: mine }));
+        }
       }
     }
     /* Who is on which world. A realm message can be missed, and a missed one
        leaves somebody drawn on the wrong planet for good, so the whole picture
        goes out whenever it changes and once every ten seconds as a repair.
        A room where nobody is travelling says nothing at all. */
-    if (realmBeat % 10 === 0) {
+    if (realmBeat % 10 === 0 && room.players.size <= NEAR_FROM) {
       const r = [];
       for (const p of room.players.values()) r.push([p.id, p.realm || 'ground']);
       const stamp = JSON.stringify(r);
@@ -1023,6 +1050,40 @@ server.on('upgrade', (req, raw) => {
       } else {
         const a = Array.isArray(m.a) ? m.a.slice(0, 120) : [];
         if (a.length) broadcast({ t: 'herd', a }, id);
+      }
+
+    } else if (m.t === 'summon') {
+      /* Asking somebody to come to you. It is only ever an invitation: their
+         own game decides, and they are told who is asking. */
+      const dest = room.players.get(String(m.to || ''));
+      if (!dest) return;
+      dest.socket.send(JSON.stringify({
+        t: 'summon', from: id, name: player.name,
+        x: +m.x || 0, y: +m.y || 0, z: +m.z || 0,
+        realm: String(m.realm || 'ground').slice(0, 32)
+      }));
+
+    } else if (m.t === 'summonReply') {
+      const asker = room.players.get(String(m.to || ''));
+      if (!asker) return;
+      asker.socket.send(JSON.stringify({ t: 'summonReply', name: player.name, ok: !!m.ok }));
+
+    } else if (m.t === 'settime' || m.t === 'setweather') {
+      // the host sets the sky for everybody
+      if (room.host !== id) return;
+      if (m.t === 'settime') {
+        const t = Number(m.time);
+        if (!Number.isFinite(t)) return;
+        room.time = ((t % 1) + 1) % 1;
+        const msg = JSON.stringify({ t: 'time', time: room.time, weather: room.weather || 'clear' });
+        for (const p of room.players.values()) p.socket.send(msg);
+      } else {
+        const kinds = ['clear', 'cloudy', 'rain', 'snow'];
+        if (kinds.indexOf(m.weather) < 0) return;
+        room.weather = m.weather;
+        room.weatherIn = 120 + Math.random() * 180;
+        const msg = JSON.stringify({ t: 'weather', weather: room.weather });
+        for (const p of room.players.values()) p.socket.send(msg);
       }
 
     } else if (m.t === 'mode') {
