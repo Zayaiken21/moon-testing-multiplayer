@@ -472,7 +472,14 @@ for (const sig of ['SIGTERM', 'SIGINT']) {
 }
 
 /* what a creature is worth, decided here so the client cannot argue */
-const RARITY_CENTS = { common: 1, uncommon: 3, rare: 8, exotic: 15, legendary: 25 };
+/* What an animal is worth.
+
+   Most of what lives in the world is common, and common pays nothing: an
+   ordinary animal is company, not wages. Only the scarcer ones are worth
+   anything, and only to the first person anywhere who tames that particular
+   animal. About one creature in five is above common, so this is something
+   to go looking for rather than something to farm. */
+const RARITY_CENTS = { common: 0, uncommon: 2, rare: 6, exotic: 12, legendary: 30 };
 const DAILY_CAP_CENTS = 500;          // a sane ceiling per account per day
 
 function account(id) {
@@ -593,7 +600,7 @@ const server = http.createServer((req, res) => {
       json(200, {
         accounts: await accounts.list(100),
         resets: pendingResets.slice(0, 20),
-        rates: { perCreature: 1, freeDaily: 5, memberDaily: 25 },
+        rates: RARITY_CENTS,
         supabase: accounts.enabled ? accounts.shards.length + ' project(s)' : 'not configured'
       });
     })();
@@ -669,7 +676,13 @@ const server = http.createServer((req, res) => {
         });
         return;
       }
-      const cents = RARITY_CENTS[rarity] !== undefined ? RARITY_CENTS[rarity] : 1;
+      const cents = RARITY_CENTS[rarity] !== undefined ? RARITY_CENTS[rarity] : 0;
+      if (cents <= 0) {
+        // it still counts as met, it simply is not worth anything
+        json(200, { ok: false, why: 'A common animal. Lovely, but it pays nothing.',
+                    cents: 0, balance: a.balance, caught: a.caught, rarity });
+        return;
+      }
       if (a.today + cents > DAILY_CAP_CENTS) {
         json(200, { ok: false, why: 'Daily limit reached. It resets tomorrow.',
                     balance: a.balance, caught: a.caught });

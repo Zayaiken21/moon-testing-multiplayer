@@ -28,7 +28,14 @@ const crypto = require('crypto');
 
 /* ---------------------------------------------------------------- earnings */
 
-const CENTS_PER_CREATURE = 1;
+/* What each kind of animal is worth, in cents.
+
+   Common pays nothing on purpose: roughly four creatures in five are common,
+   so an ordinary animal is company rather than wages, and the money is
+   something to go looking for. Only the first account anywhere to tame a
+   particular animal is paid for it. */
+const RARITY_CENTS = { common: 0, uncommon: 2, rare: 6, exotic: 12, legendary: 30 };
+const CENTS_PER_CREATURE = 1;          // kept for anything still asking
 const FREE_DAILY_CAP = 5;         // five cents a day without a subscription
 const MEMBER_DAILY_CAP = 25;      // twenty five with one
 
@@ -239,16 +246,23 @@ class Accounts {
   }
 
   /** One creature, one cent, inside today's ceiling. */
-  async credit(accountId, creatureKey, claimedAlready) {
+  async credit(accountId, creatureKey, claimedAlready, rarity) {
     const account = await this.find(accountId);
     if (!account) return { ok: false, why: 'No such account.' };
     if (claimedAlready) return { ok: false, why: 'Someone else caught this one first.', balance: account.balance };
+
+    const worth = RARITY_CENTS[String(rarity || 'common')];
+    const cents = worth === undefined ? 0 : worth;
+    if (cents <= 0) {
+      return { ok: false, why: 'A common animal. Lovely, but it pays nothing.',
+               cents: 0, balance: account.balance };
+    }
 
     const day = new Date().toISOString().slice(0, 10);
     if (account.today_key !== day) { account.today_key = day; account.today = 0; }
 
     const cap = this.dailyCap(account);
-    if (account.today + CENTS_PER_CREATURE > cap) {
+    if (account.today + cents > cap) {
       return {
         ok: false,
         why: cap === FREE_DAILY_CAP
@@ -257,11 +271,11 @@ class Accounts {
         balance: account.balance, today: account.today, cap
       };
     }
-    account.today += CENTS_PER_CREATURE;
-    account.balance += CENTS_PER_CREATURE;
+    account.today += cents;
+    account.balance += cents;
     account.caught = (account.caught || 0) + 1;
     await this.put(account);
-    return { ok: true, cents: CENTS_PER_CREATURE, balance: account.balance, today: account.today, cap };
+    return { ok: true, cents, balance: account.balance, today: account.today, cap };
   }
 
   async setSubscription(accountId, on, until) {
@@ -323,5 +337,5 @@ class Accounts {
 
 module.exports = {
   Accounts, hashPassword, checkPassword,
-  CENTS_PER_CREATURE, FREE_DAILY_CAP, MEMBER_DAILY_CAP
+  CENTS_PER_CREATURE, RARITY_CENTS, FREE_DAILY_CAP, MEMBER_DAILY_CAP
 };
