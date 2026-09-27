@@ -82,6 +82,34 @@ td.num{color:var(--glow);font-family:var(--display)}
 #history .bar small{font-size:9px;color:#8b95ad;white-space:nowrap}
 #history .two{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:18px}
 @media (max-width:720px){#history .two{grid-template-columns:1fr}}
+
+/* ---- the money controls ---- */
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;
+  padding:16px 18px;margin:14px 0}
+.panel h3{margin:0 0 12px;font-family:var(--display);font-size:15px;
+  letter-spacing:.04em;text-transform:uppercase;color:var(--glow)}
+.fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+.fields label,label.wide,label.inline{display:flex;flex-direction:column;gap:5px;
+  font-size:12px;color:var(--muted);letter-spacing:.03em}
+label.wide{margin-top:12px}
+label.inline{flex-direction:row;align-items:center;gap:7px}
+.panel input,.key-row input,label.inline input{background:var(--panel-2);
+  border:1px solid var(--line);border-radius:8px;padding:9px 11px;
+  color:var(--ink);font:inherit;font-size:14px;min-width:0}
+.panel input:focus,label.inline input:focus{outline:2px solid var(--sky);outline-offset:1px}
+label.inline input{width:120px}
+label.check{display:flex;align-items:flex-start;gap:9px;margin:9px 0;
+  font-size:13.5px;color:var(--ink);cursor:pointer}
+label.check input{width:17px;height:17px;flex:0 0 auto;margin-top:1px;accent-color:var(--sky)}
+table.tight td,table.tight th{padding:7px 8px}
+table.tight input{width:100%;padding:7px 8px;font-size:13px}
+.said{margin-top:12px;font-size:13px;line-height:1.55}
+.said.good{color:var(--glow)}
+.said.bad{color:#FF9B8A}
+.said ul{margin:6px 0 0;padding-left:18px;color:var(--muted)}
+.said code{background:var(--panel-2);border:1px solid var(--line);border-radius:6px;
+  padding:3px 8px;font-size:14px;letter-spacing:.09em;display:inline-block;margin:3px 5px 3px 0}
+td button{padding:6px 11px;font-size:12px;margin-right:6px}
 </style>
 </head>
 <body>
@@ -161,6 +189,126 @@ td.num{color:var(--glow);font-family:var(--display)}
       <tbody id="sessions"></tbody></table>
   </section>
 
+  <!-- ===================== what the game pays ===================== -->
+  <section id="money">
+    <h2>What the game pays</h2>
+    <p class="note">Every figure here is in <b>cents</b>. Changes take effect on
+      the very next animal anybody tames — there is no deploy and no restart.
+      Anything that cannot work is corrected as you save it, and you are told
+      what was corrected and why.</p>
+
+    <div class="panel">
+      <h3>What each animal is worth</h3>
+      <div class="fields">
+        <label>Common <input type="number" id="s-rate-common" min="0"></label>
+        <label>Uncommon <input type="number" id="s-rate-uncommon" min="0"></label>
+        <label>Rare <input type="number" id="s-rate-rare" min="0"></label>
+        <label>Exotic <input type="number" id="s-rate-exotic" min="0"></label>
+        <label>Legendary <input type="number" id="s-rate-legendary" min="0"></label>
+      </div>
+      <p class="note">Common is zero on purpose: most of the world is common, so
+        an ordinary animal is company rather than wages.</p>
+    </div>
+
+    <div class="panel">
+      <h3>How much may be earned in a day</h3>
+      <div class="fields">
+        <label>Without a membership <input type="number" id="s-cap-free" min="0"></label>
+        <label>With one <input type="number" id="s-cap-member" min="0"></label>
+      </div>
+      <p class="note">A daily limit below the most valuable animal is a limit
+        that refuses that animal every time, so it is raised to meet it.
+        Reaching the limit tops a player up to it exactly rather than turning
+        them away: four cents of room and a thirty cent legendary pays four.</p>
+    </div>
+
+    <div class="panel">
+      <h3>Withdrawals</h3>
+      <table class="tight">
+        <thead><tr><th></th><th>Smallest</th><th>Most in one</th><th>Most a day</th><th>Most a month</th></tr></thead>
+        <tbody>
+          <tr><td>No membership</td>
+            <td><input type="number" id="s-wd-free-min" min="1"></td>
+            <td><input type="number" id="s-wd-free-req" min="1"></td>
+            <td><input type="number" id="s-wd-free-day" min="1"></td>
+            <td><input type="number" id="s-wd-free-month" min="1"></td></tr>
+          <tr><td>Member</td>
+            <td><input type="number" id="s-wd-member-min" min="1"></td>
+            <td><input type="number" id="s-wd-member-req" min="1"></td>
+            <td><input type="number" id="s-wd-member-day" min="1"></td>
+            <td><input type="number" id="s-wd-member-month" min="1"></td></tr>
+        </tbody>
+      </table>
+      <p class="note">"Smallest" is the minimum withdrawal — nobody may ask for
+        less. The three maximums are per request, per day and per calendar
+        month, counted per account and remembered across restarts.</p>
+    </div>
+
+    <div class="panel">
+      <h3>Membership</h3>
+      <div class="fields">
+        <label>What it is called <input type="text" id="s-mem-name"></label>
+        <label>Price <input type="number" id="s-mem-price" min="0"></label>
+        <label>Days it lasts <input type="number" id="s-mem-days" min="1"></label>
+      </div>
+      <label class="wide">What it says in the store
+        <input type="text" id="s-mem-blurb"></label>
+    </div>
+
+    <div class="panel">
+      <h3>Switches</h3>
+      <label class="check"><input type="checkbox" id="s-pause-earn">
+        <span>Stop all earning now</span></label>
+      <label class="check"><input type="checkbox" id="s-pause-pay">
+        <span>Stop all withdrawals now</span></label>
+      <label class="check"><input type="checkbox" id="s-partial">
+        <span>Top a player up to their limit rather than refusing an animal
+          that does not fit</span></label>
+      <p class="note">The two stops take effect immediately and are the thing
+        to reach for if something is wrong. Nobody loses an animal: a claim
+        that is refused can be made again afterwards.</p>
+    </div>
+
+    <div class="key-row">
+      <button id="s-save">Save these</button>
+      <button class="ghost" id="s-reload">Undo my changes</button>
+      <button class="ghost" id="s-reset">Back to the original numbers</button>
+    </div>
+    <div id="s-said" class="said"></div>
+  </section>
+
+  <!-- ===================== withdrawals waiting ===================== -->
+  <section id="payouts">
+    <h2>Withdrawals waiting</h2>
+    <p class="note">The money has already left the player's balance, so this is
+      what you owe. Pay the person however you have agreed, then mark it sent.
+      Turning one down puts the money back where it came from.</p>
+    <div class="cards">
+      <div class="card"><small>Owed right now</small><b id="p-owed">—</b></div>
+      <div class="card"><small>Requests waiting</small><b id="p-waiting">—</b></div>
+    </div>
+    <table><thead><tr><th>When</th><th>Who</th><th>How much</th><th>Where to</th><th></th></tr></thead>
+      <tbody id="p-list"></tbody></table>
+  </section>
+
+  <!-- ===================== membership codes ===================== -->
+  <section id="codes">
+    <h2>Membership codes</h2>
+    <p class="note">One code turns one membership on. Take payment however you
+      already do, then hand over a code — the game has a box to type it into.
+      Nothing here is connected to a card processor, and the store in the game
+      says so rather than pretending otherwise.</p>
+    <div class="key-row">
+      <label class="inline">How many <input type="number" id="c-many" value="1" min="1" max="50"></label>
+      <label class="inline">Days each <input type="number" id="c-days" value="30" min="1"></label>
+      <label class="inline">Note <input type="text" id="c-note" placeholder="who it is for"></label>
+      <button id="c-make">Make them</button>
+    </div>
+    <div id="c-made" class="said"></div>
+    <table><thead><tr><th>Code</th><th>Days</th><th>Note</th><th>Used</th></tr></thead>
+      <tbody id="c-list"></tbody></table>
+  </section>
+
   <section>
     <h2>Over time</h2>
     <p class="note">Kept in the database, so a redeploy or a quiet night does
@@ -187,17 +335,227 @@ async function load() {
     document.querySelector('main').classList.add('ready');
     draw(await res.json());
     history(key);
+    loadSettings();
+    loadPayouts();
+    loadCodes();
     // keep it live, the way a dashboard should be
     clearInterval(window._adminTick);
     window._adminTick = setInterval(async () => {
       try {
         const r = await fetch('/admin/data?key=' + encodeURIComponent(key));
         if (r.ok) draw(await r.json());
+        loadPayouts();
       } catch (e) {}
     }, 15000);
   } catch (e) {
     $('#error').textContent = 'Could not reach the server.';
   }
+}
+
+/* ==================================================================
+   The money controls.
+
+   Everything here reads and writes one settings object on the server. The
+   server is the one that decides whether a set of numbers can work: this
+   page sends what you typed, and shows back both what was saved and
+   anything that had to be corrected, so a figure that could not be honoured
+   never changes quietly behind your back.
+   ================================================================== */
+
+const adminKey = () => $('#key').value.trim() || localStorage.getItem('voxelia.adminkey') || '';
+const money = (c) => '$' + ((Number(c) || 0) / 100).toFixed(2);
+
+function say(where, text, good, list) {
+  const el = $(where);
+  if (!el) return;
+  el.className = 'said ' + (good ? 'good' : 'bad');
+  el.innerHTML = text + (list && list.length
+    ? '<ul><li>' + list.map(s => String(s).replace(/</g, '&lt;')).join('</li><li>') + '</li></ul>'
+    : '');
+}
+
+/** Put a settings object into the boxes on the page. */
+function fillSettings(s) {
+  if (!s) return;
+  window._settings = s;
+  for (const r of ['common', 'uncommon', 'rare', 'exotic', 'legendary']) {
+    const el = $('#s-rate-' + r);
+    if (el) el.value = s.rates[r];
+  }
+  $('#s-cap-free').value = s.caps.free;
+  $('#s-cap-member').value = s.caps.member;
+  for (const t of ['free', 'member']) {
+    $('#s-wd-' + t + '-min').value = s.withdraw[t].min;
+    $('#s-wd-' + t + '-req').value = s.withdraw[t].maxPerRequest;
+    $('#s-wd-' + t + '-day').value = s.withdraw[t].maxPerDay;
+    $('#s-wd-' + t + '-month').value = s.withdraw[t].maxPerMonth;
+  }
+  $('#s-mem-name').value = s.membership.name || '';
+  $('#s-mem-price').value = s.membership.priceCents;
+  $('#s-mem-days').value = s.membership.days;
+  $('#s-mem-blurb').value = s.membership.blurb || '';
+  $('#s-pause-earn').checked = !!s.earningPaused;
+  $('#s-pause-pay').checked = !!s.payoutsPaused;
+  $('#s-partial').checked = s.partialCredit !== false;
+}
+
+/** Read the boxes back out. */
+function readSettings() {
+  const num = (sel) => Math.round(Number($(sel).value) || 0);
+  return {
+    rates: {
+      common: num('#s-rate-common'), uncommon: num('#s-rate-uncommon'),
+      rare: num('#s-rate-rare'), exotic: num('#s-rate-exotic'),
+      legendary: num('#s-rate-legendary')
+    },
+    caps: { free: num('#s-cap-free'), member: num('#s-cap-member') },
+    withdraw: {
+      free: {
+        min: num('#s-wd-free-min'), maxPerRequest: num('#s-wd-free-req'),
+        maxPerDay: num('#s-wd-free-day'), maxPerMonth: num('#s-wd-free-month')
+      },
+      member: {
+        min: num('#s-wd-member-min'), maxPerRequest: num('#s-wd-member-req'),
+        maxPerDay: num('#s-wd-member-day'), maxPerMonth: num('#s-wd-member-month')
+      }
+    },
+    membership: {
+      name: $('#s-mem-name').value, priceCents: num('#s-mem-price'),
+      days: num('#s-mem-days'), blurb: $('#s-mem-blurb').value
+    },
+    earningPaused: $('#s-pause-earn').checked,
+    payoutsPaused: $('#s-pause-pay').checked,
+    partialCredit: $('#s-partial').checked
+  };
+}
+
+async function loadSettings() {
+  try {
+    const res = await fetch('/admin/settings?key=' + encodeURIComponent(adminKey()));
+    const d = await res.json();
+    if (d.ok) { fillSettings(d.settings); say('#s-said', '', true); }
+  } catch (e) { say('#s-said', 'Could not read the current numbers.', false); }
+}
+
+async function saveSettings(reset) {
+  say('#s-said', 'Saving…', true);
+  try {
+    const res = await fetch('/admin/settings?key=' + encodeURIComponent(adminKey()), {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(reset ? { reset: true } : { settings: readSettings() })
+    });
+    const d = await res.json();
+    if (!d.ok) { say('#s-said', d.why || 'That was not accepted.', false); return; }
+    fillSettings(d.settings);
+    say('#s-said', d.notes && d.notes.length
+      ? 'Saved, with these corrected so they can actually work:'
+      : 'Saved. The next animal anybody tames is paid at these rates.',
+      true, d.notes);
+  } catch (e) {
+    say('#s-said', 'Could not reach the server, so nothing was changed.', false);
+  }
+}
+
+/* ---- withdrawals waiting ---- */
+async function loadPayouts() {
+  try {
+    const res = await fetch('/admin/payouts?key=' + encodeURIComponent(adminKey()));
+    const d = await res.json();
+    if (!d.ok) return;
+    $('#p-owed').textContent = money(d.owed);
+    $('#p-waiting').textContent = fmt(d.waiting.length);
+    const body = $('#p-list');
+    body.innerHTML = '';
+    if (!d.recent.length) {
+      body.innerHTML = '<tr><td colspan="5" class="note">Nobody has asked to be paid yet.</td></tr>';
+      return;
+    }
+    for (const p of d.recent) {
+      const tr = document.createElement('tr');
+      const when = String(p.requested_at || '').slice(0, 16).replace('T', ' ');
+      const who = (p.username || p.account_id || '').replace(/</g, '&lt;');
+      tr.innerHTML = '<td>' + when + '</td><td>' + who + '</td>' +
+        '<td><b>' + money(p.cents) + '</b></td>' +
+        '<td>' + String(p.method || '') + ' ' +
+          String(p.destination || '').replace(/</g, '&lt;') + '</td><td></td>';
+      const cell = tr.lastElementChild;
+      if (p.status === 'requested') {
+        const sent = document.createElement('button');
+        sent.textContent = 'Mark sent';
+        sent.onclick = () => settle(p.id, 'sent');
+        const no = document.createElement('button');
+        no.className = 'ghost';
+        no.textContent = 'Turn down';
+        no.onclick = () => settle(p.id, 'refuse');
+        cell.append(sent, no);
+      } else {
+        cell.innerHTML = '<span class="note">' + p.status +
+          (p.provider_ref ? ' · ' + String(p.provider_ref).replace(/</g, '&lt;') : '') + '</span>';
+      }
+      body.appendChild(tr);
+    }
+  } catch (e) {}
+}
+
+async function settle(id, action) {
+  let ref = '', why = '';
+  if (action === 'sent') {
+    ref = prompt('Paid. What is the reference from wherever you sent it?') || '';
+  } else {
+    why = prompt('Turning this down puts the money back. Why?') || '';
+    if (!confirm('Return this money to the player?')) return;
+  }
+  try {
+    const res = await fetch('/admin/payouts?key=' + encodeURIComponent(adminKey()), {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id, action, ref, why })
+    });
+    const d = await res.json();
+    if (!d.ok) alert(d.why || 'That did not work.');
+    loadPayouts();
+  } catch (e) { alert('Could not reach the server.'); }
+}
+
+/* ---- membership codes ---- */
+async function loadCodes() {
+  try {
+    const res = await fetch('/admin/codes?key=' + encodeURIComponent(adminKey()));
+    const d = await res.json();
+    if (!d.ok) return;
+    const body = $('#c-list');
+    body.innerHTML = '';
+    if (!d.codes.length) {
+      body.innerHTML = '<tr><td colspan="4" class="note">No codes yet.</td></tr>';
+      return;
+    }
+    for (const c of d.codes) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = '<td><code>' + c.code + '</code></td><td>' + c.days + '</td>' +
+        '<td>' + String(c.note || '').replace(/</g, '&lt;') + '</td>' +
+        '<td>' + (c.usedBy
+          ? String(c.usedAt ? new Date(c.usedAt).toISOString().slice(0, 10) : 'yes')
+          : '<span class="note">not yet</span>') + '</td>';
+      body.appendChild(tr);
+    }
+  } catch (e) {}
+}
+
+async function makeCodes() {
+  try {
+    const res = await fetch('/admin/codes?key=' + encodeURIComponent(adminKey()), {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        many: Number($('#c-many').value) || 1,
+        days: Number($('#c-days').value) || 30,
+        note: $('#c-note').value
+      })
+    });
+    const d = await res.json();
+    if (!d.ok) { say('#c-made', d.why || 'That did not work.', false); return; }
+    say('#c-made', 'Made. Hand these out — each one is good for ' + d.days + ' days:<br>' +
+      d.codes.map(c => '<code>' + c + '</code>').join(''), true);
+    loadCodes();
+  } catch (e) { say('#c-made', 'Could not reach the server.', false); }
 }
 
 /* The part that survives a restart. Everything above lives in the running
@@ -313,6 +671,15 @@ $('#auto').addEventListener('click', () => {
   clearInterval(timer);
   if (auto) timer = setInterval(load, 15000);
 });
+
+$('#s-save').addEventListener('click', () => saveSettings(false));
+$('#s-reload').addEventListener('click', loadSettings);
+$('#s-reset').addEventListener('click', () => {
+  if (confirm('Put every rate, limit and withdrawal rule back to what the game shipped with?')) {
+    saveSettings(true);
+  }
+});
+$('#c-make').addEventListener('click', makeCodes);
 
 const saved = localStorage.getItem('voxelia.adminkey');
 if (saved) { $('#key').value = saved; load(); }

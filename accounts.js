@@ -79,7 +79,10 @@ const token = () => crypto.randomBytes(24).toString('hex');
 const ACCOUNT_COLUMNS = [
   'id', 'email', 'username', 'password', 'balance', 'caught', 'today', 'today_key',
   'subscribed', 'subscription_until', 'companions', 'role', 'created_at',
-  'last_seen', 'shard'
+  'last_seen', 'shard',
+  /* what has already been taken out, so the per-day and per-month
+     withdrawal ceilings survive a restart */
+  'payout_today', 'payout_day_key', 'payout_month', 'payout_month_key'
 ];
 const normalEmail = (e) => String(e || '').trim().toLowerCase();
 
@@ -119,6 +122,11 @@ class Accounts {
     }));
     this.table = opts.table || 'accounts';
     this.log = opts.log || (() => {});
+    /* Where the money numbers come from. Given one, every rate and ceiling
+       is read from it live, so the admin page changes them without a deploy.
+       Without one, the constants at the top of this file are used, which is
+       what keeps this module usable on its own in a test. */
+    this.settings = opts.settings || null;
     this.enabled = this.shards.length > 0 && !!this.shards[0].key;
 
     /* Say plainly, once, at boot, whether this is going to work. Finding out
@@ -379,54 +387,273 @@ class Accounts {
 
   /* ----------------------------- earnings ----------------------------- */
 
-  dailyCap(account) {
-    const live = account.subscribed &&
-      (!account.subscription_until || new Date(account.subscription_until) > new Date());
-    return live ? MEMBER_DAILY_CAP : FREE_DAILY_CAP;
+  /** Is this membership live right now? An expired one is not. */
+  isMember(account) {
+    return !!(account && account.subscribed &&
+      (!account.subscription_until || new Date(account.subscription_until) > new Date()));
   }
 
-  /** One creature, one cent, inside today's ceiling. */
+  tier(account) { return this.isMember(account) ? 'member' : 'free'; }
+
+  dailyCap(account) {
+    if (this.settings) return this.settings.capFor(this.tier(account));
+    return this.isMember(account) ? MEMBER_DAILY_CAP : FREE_DAILY_CAP;
+  }
+
+  worthOf(rarity) {
+    if (this.settings) return this.settings.worth(rarity);
+    const c = RARITY_CENTS[String(rarity || 'common')];
+    return c === undefined ? 0 : c;
+  }
+
+  /**
+   * Pay an account for taming one animal.
+   *
+   * Two things in here were wrong for a long time and are worth spelling out,
+   * because between them they meant a player could be told they had been paid
+   * and have nothing to show for it.
+   *
+   * 1. **A refusal has to reach the caller.** This function has always
+   *    returned `ok: false` when it would not pay — but /claim used to answer
+   *    the browser `ok: true` regardless, using a figure from its own
+   *    in-memory ledger. The player saw "Caught! $0.06 added" and their real
+   *    account never moved. That is fixed in server.js; this end simply has
+   *    to be trusted, so it now never returns ok unless money genuinely
+   *    landed in the database.
+   *
+   * 2. **A save that failed is not a payment.** The balance used to be
+   *    raised, `put` allowed to fail quietly, and success returned anyway.
+   *    Now the account is put back exactly as it was and the caller is told
+   *    the truth, so the animal can be claimed again once the database is
+   *    healthy rather than being burned for ever.
+   *
+   * And the ceiling now tops you up rather than turning you away: if you have
+   * four cents of room left and tame a thirty cent legendary, you are paid
+   * the four. You reach your limit exactly once a day instead of stopping
+   * somewhere short of it because nothing fits in the gap.
+   */
   async credit(accountId, creatureKey, claimedAlready, rarity) {
     const account = await this.find(accountId);
-    if (!account) return { ok: false, why: 'No such account.' };
-    if (claimedAlready) return { ok: false, why: 'Someone else caught this one first.', balance: account.balance };
+    if (!account) return { ok: false, why: 'No such account.', code: 'no-account' };
+    if (claimedAlready) {
+      return { ok: false, why: 'Someone else caught this one first.',
+               code: 'taken', balance: account.balance };
+    }
 
-    const worth = RARITY_CENTS[String(rarity || 'common')];
-    const cents = worth === undefined ? 0 : worth;
-    if (cents <= 0) {
+    if (this.settings && this.settings.values.earningPaused) {
+      return { ok: false, why: 'Earning is paused just now. Your animal is still yours.',
+               code: 'paused', balance: account.balance };
+    }
+
+    const full = this.worthOf(rarity);
+    if (full <= 0) {
       return { ok: false, why: 'A common animal. Lovely, but it pays nothing.',
-               cents: 0, balance: account.balance };
+               code: 'common', cents: 0, balance: account.balance };
     }
 
     const day = new Date().toISOString().slice(0, 10);
     if (account.today_key !== day) { account.today_key = day; account.today = 0; }
 
     const cap = this.dailyCap(account);
-    if (account.today + cents > cap) {
+    const room = Math.max(0, cap - (account.today || 0));
+    const topUp = !this.settings || this.settings.values.partialCredit !== false;
+
+    if (room <= 0) {
       return {
         ok: false,
-        why: cap === FREE_DAILY_CAP
+        why: this.tier(account) === 'free'
           ? 'That is all for today. A membership raises the daily limit.'
           : 'That is all for today. It starts again tomorrow.',
-        balance: account.balance, today: account.today, cap
+        code: 'capped',
+        balance: account.balance, today: account.today, cap, worth: full
       };
     }
-    account.today += cents;
-    account.balance += cents;
+    /* The whole animal if it fits, otherwise whatever room is left — which
+       is what puts you exactly on your limit rather than leaving you short
+       of it holding an animal too valuable to fit. */
+    const cents = topUp ? Math.min(full, room) : (full <= room ? full : 0);
+    if (cents <= 0) {
+      return {
+        ok: false,
+        why: 'Only ' + room + 'c left today, and this one is worth ' + full + 'c.',
+        code: 'capped', balance: account.balance, today: account.today, cap, worth: full
+      };
+    }
+
+    /* Keep what to put back, in case the database will not take the change. */
+    const before = {
+      balance: account.balance, today: account.today,
+      caught: account.caught, today_key: account.today_key
+    };
+    account.today = (account.today || 0) + cents;
+    account.balance = (account.balance || 0) + cents;
     account.caught = (account.caught || 0) + 1;
+
     await this.put(account);
-    return { ok: true, cents, balance: account.balance, caught: account.caught,
-             today: account.today, cap };
+
+    if (this.enabled && account.saved === false) {
+      // it did not reach the database, so it did not happen
+      account.balance = before.balance;
+      account.today = before.today;
+      account.caught = before.caught;
+      account.today_key = before.today_key;
+      return {
+        ok: false, code: 'not-saved',
+        why: 'Your wallet could not be reached just then — nothing was taken, ' +
+             'and this animal can still be claimed.',
+        detail: account.whyNotSaved || '', balance: before.balance
+      };
+    }
+
+    return {
+      ok: true, cents, worth: full,
+      short: cents < full,                 // paid less than it was worth: the cap
+      balance: account.balance, caught: account.caught,
+      today: account.today, cap, tier: this.tier(account)
+    };
   }
 
-  async setSubscription(accountId, on, until) {
+  /* ---------------------------- withdrawals --------------------------- */
+
+  /**
+   * What this account may take out right now, and why not if it may not.
+   *
+   * Every limit is per tier and lives in settings, so the whole shape of it
+   * is changed from the admin page rather than from here.
+   */
+  async withdrawable(accountId) {
     const account = await this.find(accountId);
     if (!account) return { ok: false, why: 'No such account.' };
+    return this.withdrawableFor(account);
+  }
+
+  withdrawableFor(account) {
+    const tier = this.tier(account);
+    const rules = this.settings
+      ? this.settings.withdrawFor(tier)
+      : { min: 500, maxPerRequest: 2000, maxPerDay: 2000, maxPerMonth: 5000 };
+    const paused = !!(this.settings && this.settings.values.payoutsPaused);
+
+    const day = new Date().toISOString().slice(0, 10);
+    const month = day.slice(0, 7);
+    const takenToday = (account.payout_day_key === day) ? (account.payout_today || 0) : 0;
+    const takenMonth = (account.payout_month_key === month) ? (account.payout_month || 0) : 0;
+
+    const balance = account.balance || 0;
+    const most = Math.min(
+      balance,
+      rules.maxPerRequest,
+      Math.max(0, rules.maxPerDay - takenToday),
+      Math.max(0, rules.maxPerMonth - takenMonth)
+    );
+
+    let why = '';
+    if (paused) why = 'Withdrawals are paused just now.';
+    else if (balance < rules.min) why = 'Withdrawals open at ' + rules.min + 'c. You have ' + balance + 'c.';
+    else if (rules.maxPerDay - takenToday <= 0) why = 'That is all you may take out today.';
+    else if (rules.maxPerMonth - takenMonth <= 0) why = 'That is all you may take out this month.';
+    else if (most < rules.min) why = 'What is left of your limit is below the ' + rules.min + 'c minimum.';
+
+    return {
+      ok: !why, why, tier, rules, balance,
+      min: rules.min, most: Math.max(0, most),
+      takenToday, takenMonth, paused
+    };
+  }
+
+  /**
+   * Record a withdrawal request. The money leaves the balance here, so it
+   * cannot be requested twice while somebody is deciding whether to send it.
+   * Nothing in this file talks to a payment company: a request is a request.
+   */
+  async requestPayout(accountId, cents, method, destination) {
+    const account = await this.find(accountId);
+    if (!account) return { ok: false, why: 'No such account.' };
+
+    const want = Math.round(Number(cents) || 0);
+    const room = this.withdrawableFor(account);
+    if (!room.ok) return { ok: false, why: room.why, room };
+    if (want < room.min) return { ok: false, why: 'The smallest withdrawal is ' + room.min + 'c.', room };
+    if (want > room.most) return { ok: false, why: 'The most you may take out right now is ' + room.most + 'c.', room };
+
+    const day = new Date().toISOString().slice(0, 10);
+    const month = day.slice(0, 7);
+    if (account.payout_day_key !== day) { account.payout_day_key = day; account.payout_today = 0; }
+    if (account.payout_month_key !== month) { account.payout_month_key = month; account.payout_month = 0; }
+
+    const before = { balance: account.balance, today: account.payout_today, month: account.payout_month };
+    account.balance -= want;
+    account.payout_today = (account.payout_today || 0) + want;
+    account.payout_month = (account.payout_month || 0) + want;
+
+    await this.put(account);
+    if (this.enabled && account.saved === false) {
+      account.balance = before.balance;
+      account.payout_today = before.today;
+      account.payout_month = before.month;
+      return { ok: false, why: 'Your wallet could not be reached just then. Nothing was taken.' };
+    }
+
+    const row = {
+      id: 'pay_' + token().slice(0, 16),
+      account_id: account.id,
+      username: account.username || '',
+      email: account.email || '',
+      cents: want,
+      method: String(method || 'unsaid').slice(0, 40),
+      destination: String(destination || '').slice(0, 200),
+      status: 'requested',
+      requested_at: new Date().toISOString()
+    };
+    /* The database gives payouts a number of its own, so our id goes in `ref`
+       rather than in `id` — sending a text id to a bigserial column makes
+       PostgREST refuse the whole row. The list the admin page works from is
+       kept by the server either way, so a database that will not take this
+       row does not lose the request. */
+    try {
+      await this.insert('payouts', [{
+        account_id: row.account_id, username: row.username, email: row.email,
+        cents: row.cents, method: row.method, destination: row.destination,
+        status: row.status, requested_at: row.requested_at, ref: row.id
+      }]);
+    } catch (e) {
+      this.log('payout row not written to the database: ' + (e && e.message));
+    }
+
+    return { ok: true, payout: row, balance: account.balance,
+             took: want, left: this.withdrawableFor(account) };
+  }
+
+  /**
+   * Turn a membership on or off.
+   *
+   * Given `days`, the time is added to whatever is left rather than replacing
+   * it, so renewing a month early gives you thirteen months rather than
+   * throwing away the one you paid for.
+   */
+  async setSubscription(accountId, on, until, days) {
+    const account = await this.find(accountId);
+    if (!account) return { ok: false, why: 'No such account.' };
+
+    if (on && days) {
+      const now = Date.now();
+      const standing = account.subscription_until
+        ? new Date(account.subscription_until).getTime() : 0;
+      const from = (this.isMember(account) && standing > now) ? standing : now;
+      until = new Date(from + Number(days) * 86400000).toISOString();
+    }
+
     account.subscribed = !!on;
     account.subscription_until = on ? (until || null) : null;
     await this.put(account);
-    return { ok: true, account: this.publicView(account) };
+    if (this.enabled && account.saved === false) {
+      return { ok: false, why: 'Could not save that — ' + (account.whyNotSaved || 'the database refused it') };
+    }
+    return { ok: true, account: this.publicView(account), until: account.subscription_until };
   }
+
+  /** Point every rate and ceiling at a live settings object. */
+  setSettings(s) { this.settings = s; return this; }
 
   async setCompanions(accountId, companions) {
     const account = await this.find(accountId);
@@ -465,7 +692,9 @@ class Accounts {
       balance: a.balance || 0, caught: a.caught || 0,
       today: a.today || 0, cap: this.dailyCap(a),
       subscribed: !!a.subscribed, subscription_until: a.subscription_until || null,
-      companions: (a.companions || []).length, role: a.role || 'player'
+      member: this.isMember(a), tier: this.tier(a),
+      companions: (a.companions || []).length, role: a.role || 'player',
+      withdraw: this.withdrawableFor(a)
     };
   }
 

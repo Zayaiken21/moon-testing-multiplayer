@@ -341,6 +341,21 @@ const pendingResets = [];        // shown on the admin page until email is wired
    wiped on every redeploy. Render reads it on boot and commits changes back. */
 const store = new GitHubStore({ localDir: __dirname, log: (m) => console.log('  store: ' + m) });
 
+/* Every number that decides money — what each animal pays, how much may be
+   earned in a day, how much may be withdrawn and by whom — lives in one
+   object the admin page edits, rather than as constants in three files that
+   have to be kept in agreement by hand. */
+const { Settings } = require('./settings');
+const settings = new Settings({ store, log: (m) => console.log('  settings: ' + m) });
+accounts.setSettings(settings);
+settings.load().then(() => {
+  const v = settings.values;
+  console.log('  rates: ' + Object.keys(v.rates).map(k => k + ' ' + v.rates[k] + 'c').join(', '));
+  console.log('  daily limit: free ' + v.caps.free + 'c, member ' + v.caps.member + 'c');
+  console.log('  withdrawals: free from ' + v.withdraw.free.min + 'c, member from ' +
+              v.withdraw.member.min + 'c');
+});
+
 const STATS_FILE = path.join(__dirname, 'stats.json');
 /* The word that guards the admin page.
 
@@ -513,12 +528,62 @@ setInterval(() => {
   store.save('ledger.json', ledger);
 }, 8000);
 
+/* ---------- withdrawals waiting to be sent ----------
+   The money has already left the balance by the time a row lands here, so
+   this list is what you owe. It outlives a redeploy because it is saved the
+   same way everything else is. */
+let payoutQueue = [];
+let payoutsDirty = false;
+store.load('payouts.json', null).then((saved) => {
+  if (Array.isArray(saved)) payoutQueue = saved;
+  const open = payoutQueue.filter(p => p.status === 'requested').length;
+  if (open) console.log('  withdrawals waiting to be sent: ' + open);
+});
+
+/* ---------- membership codes ----------
+   One code, one membership. Made on the admin page, typed into the store in
+   the game. Kept as a Map in memory and as a plain object on disk. */
+const memberCodes = new Map();
+let codesDirty = false;
+store.load('member-codes.json', null).then((saved) => {
+  if (saved && typeof saved === 'object') {
+    for (const k of Object.keys(saved)) memberCodes.set(k, saved[k]);
+    const spare = Array.from(memberCodes.values()).filter(c => !c.usedBy).length;
+    console.log('  membership codes: ' + memberCodes.size + ' (' + spare + ' unused)');
+  }
+});
+setInterval(() => {
+  if (payoutsDirty) { payoutsDirty = false; store.save('payouts.json', payoutQueue); }
+  if (codesDirty) {
+    codesDirty = false;
+    const out = {};
+    for (const [k, v] of memberCodes) out[k] = v;
+    store.save('member-codes.json', out);
+  }
+}, 8000);
+
+/** A code somebody can read off a screen and type without mistakes. */
+function makeCode() {
+  const alphabet = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';   // no O/0, no I/1/L
+  let s = '';
+  for (let i = 0; i < 12; i++) {
+    if (i === 4 || i === 8) s += '-';
+    s += alphabet[Math.floor(Math.random() * alphabet.length)];
+  }
+  return s;
+}
+
 /* a redeploy should not lose the last minute of play */
 for (const sig of ['SIGTERM', 'SIGINT']) {
   process.on(sig, async () => {
     console.log('  shutting down, saving first...');
     store.save('stats.json', stats);
     store.save('ledger.json', ledger);
+    store.save('payouts.json', payoutQueue);
+    store.save('settings.json', settings.values);
+    const codes = {};
+    for (const [k, v] of memberCodes) codes[k] = v;
+    store.save('member-codes.json', codes);
     await store.flushAll();
     process.exit(0);
   });
@@ -532,8 +597,12 @@ for (const sig of ['SIGTERM', 'SIGINT']) {
    anything, and only to the first person anywhere who tames that particular
    animal. About one creature in five is above common, so this is something
    to go looking for rather than something to farm. */
+/* These two are the numbers the game falls back on before settings have
+   finished loading, and nothing else. Everything that decides money asks
+   `settings` — see settings.js — so that changing a rate is a button on the
+   admin page rather than an edit in three files and a redeploy. */
 const RARITY_CENTS = { common: 0, uncommon: 2, rare: 6, exotic: 12, legendary: 30 };
-const DAILY_CAP_CENTS = 500;          // a sane ceiling per account per day
+const DAILY_CAP_CENTS = 500;          // only ever used if settings are missing
 
 function account(id) {
   if (!ledger.accounts[id]) {
@@ -551,7 +620,13 @@ function account(id) {
 
 /* ---------- a light rate limit, per address ---------- */
 const hits = new Map();          // ip -> { n, since }
-const LIMIT = 120;               // requests
+/* Requests allowed from one address per minute.
+
+   A household is one address: two children playing, a phone, and the admin
+   page open on a laptop all count together, and the admin page alone asks
+   four times a minute. Two hundred leaves room for a family without leaving
+   room for anybody hammering it. RATE_LIMIT raises it if you ever need to. */
+const LIMIT = Math.max(30, Number(process.env.RATE_LIMIT) || 200);
 const WINDOW = 60000;            // per minute
 
 function overLimit(req) {
@@ -652,6 +727,136 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  /* ---------------- the numbers, from the admin page ----------------
+
+     GET gives everything, POST lays a patch over it. What comes back always
+     includes `notes`: anything that had to be corrected on the way in, so a
+     figure that could not be honoured exactly never changes silently. */
+  if (url.startsWith('/admin/settings')) {
+    const key = (req.url.split('key=')[1] || '').split('&')[0];
+    if (key !== ADMIN_KEY) { json(401, { error: 'wrong key' }); return; }
+    if (req.method !== 'POST') {
+      json(200, { ok: true, settings: settings.all(), defaults: require('./settings').DEFAULTS });
+      return;
+    }
+    let body = '';
+    req.on('data', c => { body += c; if (body.length > 8192) req.destroy(); });
+    req.on('end', () => {
+      let m = {};
+      try { m = JSON.parse(body || '{}'); } catch (e) {}
+      const out = m.reset ? settings.reset() : settings.update(m.settings || m);
+      console.log('  settings changed from the admin page' +
+        (out.notes && out.notes.length ? ' (' + out.notes.join('; ') + ')' : ''));
+      json(200, out);
+    });
+    return;
+  }
+
+  /* ---------------- withdrawals, from the admin page ---------------- */
+  if (url.startsWith('/admin/payouts')) {
+    const key = (req.url.split('key=')[1] || '').split('&')[0];
+    if (key !== ADMIN_KEY) { json(401, { error: 'wrong key' }); return; }
+
+    if (req.method === 'POST') {
+      let body = '';
+      req.on('data', c => { body += c; if (body.length > 4096) req.destroy(); });
+      req.on('end', () => {
+        (async () => {
+          let m = {};
+          try { m = JSON.parse(body || '{}'); } catch (e) {}
+          const row = payoutQueue.find(p => p.id === String(m.id || ''));
+          if (!row) { json(404, { ok: false, why: 'No such request.' }); return; }
+
+          if (m.action === 'sent') {
+            row.status = 'sent';
+            row.provider_ref = String(m.ref || '').slice(0, 120);
+            row.sent_at = new Date().toISOString();
+            payoutsDirty = true;
+            try { await accounts.insert('ledger', [{
+              account_id: row.account_id, cents: -row.cents,
+              reason: 'payout ' + row.id, at: row.sent_at
+            }]); } catch (e) {}
+            json(200, { ok: true, payout: row });
+            return;
+          }
+          if (m.action === 'refuse') {
+            /* Turned down: the money goes back, because it was taken out of
+               the balance the moment it was asked for. */
+            row.status = 'refused';
+            row.why = String(m.why || '').slice(0, 200);
+            row.closed_at = new Date().toISOString();
+            payoutsDirty = true;
+            const acc = await accounts.find(row.account_id);
+            if (acc) {
+              acc.balance = (acc.balance || 0) + row.cents;
+              acc.payout_today = Math.max(0, (acc.payout_today || 0) - row.cents);
+              acc.payout_month = Math.max(0, (acc.payout_month || 0) - row.cents);
+              await accounts.put(acc);
+            }
+            json(200, { ok: true, payout: row, returned: row.cents });
+            return;
+          }
+          json(400, { ok: false, why: 'action must be sent or refuse' });
+        })().catch((e) => json(500, { ok: false, why: String(e && e.message) }));
+      });
+      return;
+    }
+
+    const open = payoutQueue.filter(p => p.status === 'requested');
+    json(200, {
+      ok: true,
+      owed: open.reduce((n, p) => n + p.cents, 0),
+      waiting: open,
+      recent: payoutQueue.slice(0, 80),
+      limits: settings.values.withdraw
+    });
+    return;
+  }
+
+  /* ---------------- membership codes, from the admin page ---------------- */
+  if (url.startsWith('/admin/codes')) {
+    const key = (req.url.split('key=')[1] || '').split('&')[0];
+    if (key !== ADMIN_KEY) { json(401, { error: 'wrong key' }); return; }
+
+    if (req.method === 'POST') {
+      let body = '';
+      req.on('data', c => { body += c; if (body.length > 2048) req.destroy(); });
+      req.on('end', () => {
+        let m = {};
+        try { m = JSON.parse(body || '{}'); } catch (e) {}
+        const many = Math.max(1, Math.min(50, Math.round(Number(m.many) || 1)));
+        const days = Math.max(1, Math.min(3650,
+          Math.round(Number(m.days) || settings.values.membership.days)));
+        const made = [];
+        for (let i = 0; i < many; i++) {
+          const shown = makeCode();
+          /* Stored without its dashes, because that is how it arrives after
+             somebody types it: the store strips them so a code works whether
+             or not they bother with them. */
+          memberCodes.set(shown.replace(/-/g, ''), {
+            display: shown, days, made: Date.now(),
+            note: String(m.note || '').slice(0, 80), usedBy: null
+          });
+          made.push(shown);
+        }
+        codesDirty = true;
+        console.log('  ' + many + ' membership code(s) made, ' + days + ' days each');
+        json(200, { ok: true, codes: made, days });
+      });
+      return;
+    }
+
+    const rows = Array.from(memberCodes.entries()).map(([k, v]) => ({
+      code: v.display || k, days: v.days, note: v.note || '',
+      made: v.made, usedBy: v.usedBy || null, usedAt: v.usedAt || null
+    })).sort((a, b) => (b.made || 0) - (a.made || 0));
+    json(200, {
+      ok: true, codes: rows.slice(0, 200),
+      unused: rows.filter(r => !r.usedBy).length, total: rows.length
+    });
+    return;
+  }
+
   if (url.startsWith('/admin/accounts')) {
     const key = (req.url.split('key=')[1] || '').split('&')[0];
     if (key !== ADMIN_KEY) { json(401, { error: 'wrong key' }); return; }
@@ -662,7 +867,27 @@ const server = http.createServer((req, res) => {
       req.on('end', async () => {
         let m = {}; try { m = JSON.parse(body || '{}'); } catch (e) {}
         if (m.action === 'delete') { json(200, await accounts.remove(m.id)); return; }
-        if (m.action === 'subscribe') { json(200, await accounts.setSubscription(m.id, !!m.on, m.until)); return; }
+        if (m.action === 'subscribe') {
+          json(200, await accounts.setSubscription(m.id, !!m.on, m.until, m.days));
+          return;
+        }
+        if (m.action === 'adjust') {
+          /* Put money in or take it out by hand, with a reason written down.
+             For fixing a mistake, not for making money appear. */
+          const acc = await accounts.find(String(m.id || ''));
+          if (!acc) { json(404, { ok: false, why: 'No such account.' }); return; }
+          const by = Math.round(Number(m.cents) || 0);
+          acc.balance = Math.max(0, (acc.balance || 0) + by);
+          await accounts.put(acc);
+          try { await accounts.insert('ledger', [{
+            account_id: acc.id, cents: by,
+            reason: 'admin: ' + String(m.why || 'no reason given').slice(0, 100),
+            at: new Date().toISOString()
+          }]); } catch (e) {}
+          console.log('  balance of ' + acc.id + ' changed by ' + by + 'c by hand');
+          json(200, { ok: true, account: accounts.publicView(acc) });
+          return;
+        }
         if (m.action === 'create') {
           const made = await accounts.signUp({
             email: m.email, username: m.username, password: m.password || 'testerpass1'
@@ -686,7 +911,7 @@ const server = http.createServer((req, res) => {
       json(200, {
         accounts: await accounts.list(100),
         resets: pendingResets.slice(0, 20),
-        rates: RARITY_CENTS,
+        rates: settings.rates(),
         supabase: accounts.enabled ? accounts.shards.length + ' project(s)' : 'not configured'
       });
     })();
@@ -703,7 +928,7 @@ const server = http.createServer((req, res) => {
     json(200, {
       wallet: {
         paid: ledger.paid, claimed: Object.keys(ledger.claimed).length,
-        accounts: Object.keys(ledger.accounts).length, top: accounts, rates: RARITY_CENTS
+        accounts: Object.keys(ledger.accounts).length, top: accounts, rates: settings.rates()
       },
       lifetime: (() => {
         const live = livePlayers();
@@ -800,49 +1025,96 @@ const server = http.createServer((req, res) => {
         });
         return;
       }
-      const cents = RARITY_CENTS[rarity] !== undefined ? RARITY_CENTS[rarity] : 0;
+      const cents = settings.worth(rarity);
       if (cents <= 0) {
         // it still counts as met, it simply is not worth anything
         json(200, { ok: false, why: 'A common animal. Lovely, but it pays nothing.',
                     cents: 0, balance: a.balance, caught: a.caught, rarity });
         return;
       }
-      if (a.today + cents > DAILY_CAP_CENTS) {
-        json(200, { ok: false, why: 'Daily limit reached. It resets tomorrow.',
+      if (settings.values.earningPaused) {
+        json(200, { ok: false, why: 'Earning is paused just now. Your animal is still yours.',
                     balance: a.balance, caught: a.caught });
         return;
       }
-      ledger.claimed[key] = { account: acc, at: Date.now(), cents };
-      a.balance += cents;
-      a.today += cents;
-      a.caught++;
-      a.claims++;
-      ledger.paid += cents;
-      ledgerDirty = true;
 
-      /* Somebody signed in is paid into their real account — the one that
-         follows them between devices and the one a payout comes from. The
-         ledger above stays as the record of every claim, and the balance
-         sent back is the account's, because that is the one they will see
-         when they next sign in anywhere else. */
+      /* Writing the claim down, in the right order.
+
+         This used to happen here, before anybody had been paid: the creature
+         was marked claimed, the in-memory figures were raised, and only then
+         was the real account asked. If the account said no — the daily
+         ceiling, a database that would not answer — the browser was still
+         told `ok: true` with a balance taken from this process's own ledger.
+         The player read "Caught! $0.06 added", their account never moved,
+         and because the creature was already marked claimed they could never
+         try again. Money that was never paid, and an animal burned for it.
+
+         So nothing is written down until somebody has actually been paid.
+         For a signed-in player the account is the only authority; the ledger
+         below is a record of what happened, written afterwards, never the
+         thing that decides. */
+      const record = (paid) => {
+        ledger.claimed[key] = { account: acc, at: Date.now(), cents: paid };
+        a.balance += paid;
+        a.today += paid;
+        a.caught++;
+        a.claims++;
+        ledger.paid += paid;
+        ledgerDirty = true;
+      };
+
       if (signedIn) {
         accounts.credit(signedIn, key, false, rarity).then((out) => {
           if (out && out.ok) {
-            json(200, { ok: true, cents: out.cents, balance: out.balance,
-                        caught: out.caught !== undefined ? out.caught : a.caught,
-                        today: out.today, cap: out.cap, rarity, account: acc });
-          } else {
-            console.log('  credit ' + signedIn + ': ' + (out && out.why));
-            json(200, { ok: true, cents, balance: a.balance, caught: a.caught, rarity, account: acc });
+            record(out.cents);
+            json(200, {
+              ok: true, cents: out.cents, worth: out.worth, short: !!out.short,
+              balance: out.balance,
+              caught: out.caught !== undefined ? out.caught : a.caught,
+              today: out.today, cap: out.cap, tier: out.tier,
+              rarity, account: acc, signedIn: true
+            });
+            return;
           }
+          /* Not paid. Say so, honestly, and leave the animal unclaimed so it
+             can be tried again when whatever went wrong is fixed. */
+          console.log('  credit ' + signedIn + ': ' + (out && out.why));
+          json(200, {
+            ok: false, why: (out && out.why) || 'That could not be paid just now.',
+            code: (out && out.code) || 'refused',
+            cents: 0, worth: (out && out.worth) || cents,
+            balance: (out && out.balance) || 0,
+            today: out && out.today, cap: out && out.cap,
+            rarity, account: acc, signedIn: true
+          });
         }).catch((e) => {
           console.log('  credit failed: ' + (e && e.message));
-          json(200, { ok: true, cents, balance: a.balance, caught: a.caught, rarity, account: acc });
+          json(200, {
+            ok: false, code: 'error',
+            why: 'Your wallet could not be reached just then — nothing was lost, ' +
+                 'and this animal can still be claimed.',
+            cents: 0, rarity, account: acc, signedIn: true
+          });
         });
         return;
       }
 
-      json(200, { ok: true, cents, balance: a.balance, caught: a.caught, rarity, account: acc });
+      /* A guest, with no account to pay into. The device ledger is all there
+         is, and it has a ceiling of its own so one browser cannot run away
+         with it. What they earn moves across when they make an account. */
+      const guestCap = settings.capFor('free');
+      const room = Math.max(0, guestCap - a.today);
+      if (room <= 0) {
+        json(200, { ok: false, code: 'capped',
+                    why: 'That is all for today. A membership raises the daily limit.',
+                    balance: a.balance, caught: a.caught, today: a.today, cap: guestCap });
+        return;
+      }
+      const paid = Math.min(cents, room);
+      record(paid);
+      json(200, { ok: true, cents: paid, worth: cents, short: paid < cents,
+                  balance: a.balance, caught: a.caught, today: a.today,
+                  cap: guestCap, rarity, account: acc, signedIn: false });
     });
     return;
   }
@@ -894,19 +1166,24 @@ const server = http.createServer((req, res) => {
        that belongs to this browser. */
     if (signedIn) {
       accounts.find(signedIn).then((a) => {
-        if (!a) { json(200, { balance: 0, caught: 0, today: 0, dailyCap: DAILY_CAP_CENTS, rates: RARITY_CENTS }); return; }
+        if (!a) { json(200, { balance: 0, caught: 0, today: 0, dailyCap: settings.capFor('free'), rates: settings.rates() }); return; }
         json(200, {
           balance: a.balance || 0, caught: a.caught || 0, today: a.today || 0,
-          dailyCap: accounts.dailyCap(a), rates: RARITY_CENTS,
+          dailyCap: accounts.dailyCap(a), rates: settings.rates(),
+          tier: accounts.tier(a), member: accounts.isMember(a),
+          subscription_until: a.subscription_until || null,
+          withdraw: accounts.withdrawableFor(a), membership: settings.values.membership,
           username: a.username, signedIn: true
         });
-      }).catch(() => json(200, { balance: 0, caught: 0, today: 0, dailyCap: DAILY_CAP_CENTS, rates: RARITY_CENTS }));
+      }).catch(() => json(200, { balance: 0, caught: 0, today: 0, dailyCap: settings.capFor('free'), rates: settings.rates() }));
       return;
     }
     const a = account(acc);
     json(200, {
       balance: a.balance, caught: a.caught, today: a.today,
-      dailyCap: DAILY_CAP_CENTS, rates: RARITY_CENTS
+      dailyCap: settings.capFor('free'), rates: settings.rates(),
+      tier: 'free', member: false, membership: settings.values.membership,
+      withdraw: { ok: false, why: 'Make an account to withdraw what you earn.', min: settings.withdrawFor('free').min, most: 0 }
     });
     return;
   }
@@ -926,6 +1203,131 @@ const server = http.createServer((req, res) => {
       rec.transfers = (rec.transfers || 0) + 1;
       ledgerDirty = true;             // the payout does not move with it
       json(200, { ok: true, paidTo: rec.account, owner: to, note: 'Ownership moved; no further payment.' });
+    });
+    return;
+  }
+
+  /* ---------------- what the numbers currently are ----------------
+
+     The game asks this so the wallet, the map legend and the store all show
+     what the server will actually do, rather than a copy of the figures that
+     was right when the page was written. Anyone may read it; only the admin
+     key may change it. */
+  if (url === '/settings' || url === '/rates') {
+    json(200, settings.publicView());
+    return;
+  }
+
+  /* ---------------- withdrawals ----------------
+
+     Money leaves an account here and nowhere else. Every limit — the
+     minimum, the most in one request, the most in a day, the most in a month
+     — is per tier and comes from settings, so all of it is controlled from
+     the admin page.
+
+     Nothing in this file moves real money. A request is a request: it takes
+     the amount out of the balance so it cannot be asked for twice, writes it
+     down, and waits for a person to send it. */
+  if (url.startsWith('/payout/quote')) {
+    const sess = (req.url.split('session=')[1] || '').split('&')[0];
+    (async () => {
+      try {
+        const id = accounts.sessionAccount(decodeURIComponent(sess || ''));
+        if (!id) { json(200, { ok: false, why: 'Sign in to withdraw what you have earned.' }); return; }
+        json(200, await accounts.withdrawable(id));
+      } catch (e) {
+        json(200, { ok: false, why: 'The server hit a problem: ' + (e && e.message) });
+      }
+    })();
+    return;
+  }
+
+  if (url === '/payout/request' && req.method === 'POST') {
+    let body = '';
+    req.on('data', c => { body += c; if (body.length > 4096) req.destroy(); });
+    req.on('end', () => {
+      (async () => {
+        let m = {};
+        try { m = JSON.parse(body || '{}'); } catch (e) {}
+        try {
+          const id = accounts.sessionAccount(String(m.session || ''));
+          if (!id) { json(200, { ok: false, why: 'Sign in to withdraw what you have earned.' }); return; }
+          const out = await accounts.requestPayout(id, m.cents, m.method, m.destination);
+          if (out.ok) {
+            console.log('  payout asked for: ' + out.payout.cents + 'c by ' +
+                        (out.payout.username || out.payout.account_id));
+            payoutQueue.unshift(out.payout);
+            if (payoutQueue.length > 500) payoutQueue.length = 500;
+            payoutsDirty = true;
+          }
+          json(200, out);
+        } catch (e) {
+          console.log('  /payout/request failed: ' + (e && e.message));
+          json(200, { ok: false, why: 'The server hit a problem. Nothing was taken.' });
+        }
+      })();
+    });
+    return;
+  }
+
+  /* ---------------- the membership store ----------------
+
+     What a membership does is raise the daily earning limit and open
+     withdrawals sooner; both figures are settings, so what is being sold is
+     whatever the admin page currently says it is.
+
+     Being straight about payment: nothing here is connected to a card
+     processor, and this does not pretend otherwise. A membership is turned
+     on by a code, and codes are made on the admin page — which is a real
+     way to sell one (take payment however you already do, then hand over a
+     code) rather than a checkout that only looks like it works. */
+  if (url === '/store/plans') {
+    const v = settings.values;
+    json(200, {
+      ok: true,
+      membership: v.membership,
+      free: { cap: v.caps.free, withdraw: v.withdraw.free },
+      member: { cap: v.caps.member, withdraw: v.withdraw.member },
+      checkout: 'code',
+      note: 'Memberships are turned on with a code.'
+    });
+    return;
+  }
+
+  if (url === '/store/redeem' && req.method === 'POST') {
+    let body = '';
+    req.on('data', c => { body += c; if (body.length > 2048) req.destroy(); });
+    req.on('end', () => {
+      (async () => {
+        let m = {};
+        try { m = JSON.parse(body || '{}'); } catch (e) {}
+        try {
+          const id = accounts.sessionAccount(String(m.session || ''));
+          if (!id) { json(200, { ok: false, why: 'Sign in first, so the membership has somewhere to go.' }); return; }
+          const code = String(m.code || '').trim().toUpperCase().replace(/[\s-]+/g, '');
+          const rec = memberCodes.get(code);
+          if (!rec) { json(200, { ok: false, why: 'That code is not one of ours.' }); return; }
+          if (rec.usedBy) { json(200, { ok: false, why: 'That code has already been used.' }); return; }
+          if (rec.expires && Date.now() > rec.expires) {
+            json(200, { ok: false, why: 'That code has run out.' }); return;
+          }
+          const days = rec.days || settings.values.membership.days;
+          const out = await accounts.setSubscription(id, true, null, days);
+          if (!out.ok) { json(200, out); return; }
+          rec.usedBy = id;
+          rec.usedAt = Date.now();
+          codesDirty = true;
+          console.log('  membership on for ' + id + ' (' + days + ' days, code ' + code + ')');
+          json(200, {
+            ok: true, until: out.until, days,
+            cap: settings.capFor('member'),
+            account: out.account,
+            note: 'Membership on until ' + String(out.until || '').slice(0, 10) + '.'
+          });
+        } catch (e) {
+          json(200, { ok: false, why: 'The server hit a problem: ' + (e && e.message) });
+        }
+      })();
     });
     return;
   }
