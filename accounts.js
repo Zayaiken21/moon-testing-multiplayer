@@ -82,7 +82,10 @@ const ACCOUNT_COLUMNS = [
   'last_seen', 'shard',
   /* what has already been taken out, so the per-day and per-month
      withdrawal ceilings survive a restart */
-  'payout_today', 'payout_day_key', 'payout_month', 'payout_month_key'
+  'payout_today', 'payout_day_key', 'payout_month', 'payout_month_key',
+  /* who this person is to Stripe, so a membership can be matched back to
+     them when Stripe tells us something about it later */
+  'stripe_customer', 'stripe_subscription', 'trial_used'
 ];
 const normalEmail = (e) => String(e || '').trim().toLowerCase();
 
@@ -654,6 +657,73 @@ class Accounts {
 
   /** Point every rate and ceiling at a live settings object. */
   setSettings(s) { this.settings = s; return this; }
+
+  /* ----------------------------- Stripe ------------------------------- */
+
+  /**
+   * Which account is this Stripe customer?
+   *
+   * Most subscription events carry the account id in their metadata, because
+   * it is put there when the checkout is made. But an event can arrive
+   * without it — one made by hand in the Stripe dashboard, for instance —
+   * and then the customer id is the only thread back to the person. Without
+   * this, a membership cancelled from the dashboard would never switch off
+   * in the game.
+   */
+  async findByCustomer(customerId) {
+    const want = String(customerId || '');
+    if (!want) return null;
+    if (!this.enabled) {
+      for (const a of this.memory.values()) if (a.stripe_customer === want) return a;
+      return null;
+    }
+    for (let shard = 0; shard < this.shards.length; shard++) {
+      const res = await this._call(shard, 'GET',
+        this.table + '?stripe_customer=eq.' + encodeURIComponent(want) + '&limit=1');
+      if (res.status === 200 && Array.isArray(res.body) && res.body.length) {
+        return Object.assign({ shard }, res.body[0]);
+      }
+    }
+    return null;
+  }
+
+  /**
+   * What Stripe just told us about somebody's membership.
+   *
+   * This is the only thing that turns a membership on, and it is only ever
+   * called from a webhook whose signature has been checked. Nothing a
+   * browser sends can reach it.
+   */
+  async applyStripe(accountId, note) {
+    const account = await this.find(accountId);
+    if (!account) return { ok: false, why: 'No such account.' };
+
+    if (note.customer) account.stripe_customer = note.customer;
+    if (note.subscription) account.stripe_subscription = note.subscription;
+    if (note.trialing) account.trial_used = true;
+
+    if (note.member !== undefined) {
+      account.subscribed = !!note.member;
+      /* Stripe knows when this runs out, so that date is used rather than one
+         worked out here. A membership that is ending at the end of the month
+         stays on until then, which is what somebody who cancelled expects.
+
+         During a free trial there is no billing period yet, so the only date
+         Stripe gives is when the trial ends. Taking `until` alone left a
+         trialing account with no end date at all — and no end date means a
+         membership that never expires, so a cancellation webhook that went
+         astray would have left somebody a member for good. The trial's own
+         end is the right answer while the trial is running. */
+      const ends = note.until || note.trialEnds || null;
+      account.subscription_until = note.member ? ends : null;
+    }
+
+    await this.put(account);
+    if (this.enabled && account.saved === false) {
+      return { ok: false, why: account.whyNotSaved || 'could not be saved' };
+    }
+    return { ok: true, account: this.publicView(account), member: this.isMember(account) };
+  }
 
   async setCompanions(accountId, companions) {
     const account = await this.find(accountId);
