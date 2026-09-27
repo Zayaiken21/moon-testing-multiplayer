@@ -58,11 +58,25 @@ function checkPassword(password, stored) {
 }
 
 const token = () => crypto.randomBytes(24).toString('hex');
+
+/* The columns the accounts table has. Only these are ever sent.
+
+   Anything here that the table does not have makes PostgREST refuse the whole
+   row with a 400, so this list is deliberately the smallest one that works,
+   and matches schema.sql exactly. If a column is ever added here, add it to
+   schema.sql in the same change. */
+const ACCOUNT_COLUMNS = [
+  'id', 'email', 'username', 'password', 'balance', 'caught', 'today', 'today_key',
+  'subscribed', 'subscription_until', 'companions', 'role', 'created_at',
+  'last_seen', 'shard'
+];
 const normalEmail = (e) => String(e || '').trim().toLowerCase();
 
 /* ----------------------------------------------------------------- the API */
 
 class Accounts {
+  static COLUMNS = ACCOUNT_COLUMNS;
+
   constructor(opts = {}) {
     const urls = (opts.urls || process.env.SUPABASE_URLS || process.env.SUPABASE_URL || '')
       .split(',').map(s => s.trim()).filter(Boolean);
@@ -204,11 +218,23 @@ class Accounts {
   }
 
   async put(account) {
-    account.updated_at = new Date().toISOString();
+    account.last_seen = new Date().toISOString();
     if (!this.enabled) { this.memory.set(account.id, account); return account; }
     const shard = account.shard === undefined ? this.shardFor(account.id) : account.shard;
-    const row = Object.assign({}, account);
-    delete row.shard;
+
+    /* Send the columns the table has, and nothing else.
+
+       A row was built by copying the whole account object, so anything the
+       code happened to hang on it went to the database too — a note about
+       whether the last save worked, a timestamp the table did not have — and
+       PostgREST refuses the lot with a 400 the moment one name is unknown.
+       Listing the columns means a field added in the code can never again
+       stop people signing up. */
+    const row = {};
+    for (const col of Accounts.COLUMNS) {
+      if (account[col] !== undefined) row[col] = account[col];
+    }
+
     const res = await this._call(shard, 'POST', this.table,
       [row], { prefer: 'resolution=merge-duplicates,return=representation' });
     if (res.status >= 200 && res.status < 300) { account.saved = true; return account; }
@@ -216,10 +242,15 @@ class Accounts {
        say so: a caller that tells somebody "welcome, your account is made"
        when it is not has done them real harm — they will come back tomorrow
        and find no account at all. */
+    /* Whatever the database said, say it. A bare "answered 400" is not
+       something anybody can act on; "column accounts.updated_at does not
+       exist" is fixed in a minute. */
+    const said = res.body && (res.body.message || res.body.hint || res.body.details);
     const why = res.status === 401 || res.status === 403
       ? 'the service key was refused (' + res.status + ')'
       : res.status === 0 ? 'the database could not be reached'
-      : 'the database answered ' + res.status;
+      : res.status === 404 ? 'there is no accounts table — run schema.sql in Supabase'
+      : 'the database answered ' + res.status + (said ? ': ' + said : '');
     this.log('could not save ' + account.id + ' to shard ' + shard + ': ' + why);
     this.memory.set(account.id, account);
     account.saved = false;
