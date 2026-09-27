@@ -405,12 +405,23 @@ const dayKey = () => new Date().toISOString().slice(0, 10);
 /* Who is playing right now, in a room or alone.
    Clients send a heartbeat once a minute; anyone quiet for three is gone. */
 const heartbeats = new Map();     // account -> { at, mode, minutes }
+const aliveNames = new Map();     // the same keys, with a name where we know one
 const ALIVE_MS = 180000;
 
-function markAlive(acc, mode) {
+/**
+ * Somebody is still playing.
+ *
+ * `who` is whoever this really is: the signed-in account when there is one,
+ * and the browser's own id when there is not. It used to always be the
+ * browser's id, so the same person on a phone and a laptop counted as two
+ * players with half the playing time each, and the admin page could never
+ * put a name to any of it.
+ */
+function markAlive(acc, mode, name) {
   if (!acc) return;
   const now = Date.now();
   const was = heartbeats.get(acc);
+  if (name) aliveNames.set(acc, name);
   const rec = was || { at: now, mode, minutes: 0, since: now };
   // a heartbeat within the window means another minute of play
   if (was && now - was.at < ALIVE_MS) rec.minutes += (now - was.at) / 60000;
@@ -422,6 +433,49 @@ function markAlive(acc, mode) {
   stats.players = stats.players || {};
   if (stats.players[acc]) stats.players[acc].minutes = Math.round(rec.minutes);
   statsDirty = true;
+}
+
+/* The real accounts, kept to hand.
+
+   The admin page asks for its figures every fifteen seconds and there may be
+   several people looking at it. Reading the database that often would be a
+   waste and, on a busy afternoon, a way to be rate limited by Supabase
+   itself. So it is read at most once a minute and everything in between is
+   answered from this. */
+const realAccounts = { rows: [], at: 0, reading: false };
+const REAL_EVERY = 60000;
+
+function refreshRealAccounts(force) {
+  /* `accounts.list()` answers from Supabase when it is configured and from
+     the copy this process is holding when it is not, so this works either
+     way — and a server running without keys still shows real names and real
+     balances for everybody who signed up since it started, rather than an
+     empty table. The `source` field on the answer says which it is. */
+  if (!accounts) { realAccounts.rows = []; return; }
+  const now = Date.now();
+  if (!force && realAccounts.reading) return;
+  if (!force && now - realAccounts.at < REAL_EVERY) return;
+  realAccounts.reading = true;
+  accounts.list(200).then((rows) => {
+    realAccounts.rows = Array.isArray(rows) ? rows : [];
+    realAccounts.at = Date.now();
+  }).catch((e) => {
+    console.log('  could not read accounts for the admin page: ' + (e && e.message));
+    realAccounts.at = Date.now();          // do not hammer it after a failure
+  }).then(() => { realAccounts.reading = false; });
+}
+
+/* Something changed that the admin page's cached list would not know about —
+   somebody signed up, was paid, or took money out. Marking it stale costs
+   nothing and means the next look is right, rather than up to a minute
+   behind and showing "Accounts 0" next to a table with people in it. */
+function accountsChanged() { realAccounts.at = 0; }
+
+/** How long this person has played, in whole minutes. */
+function playedBy(id) {
+  const live = heartbeats.get(id);
+  const kept = (stats.players && stats.players[id] && stats.players[id].minutes) || 0;
+  return Math.round(Math.max(kept, live ? live.minutes : 0));
 }
 
 function livePlayers() {
@@ -702,7 +756,12 @@ const server = http.createServer((req, res) => {
       if (k) params[k] = decodeURIComponent(v || '');
     });
     if (params.mode === 'alive') {
-      markAlive(params.account, params.play || 'survival');
+      /* A signed-in player is counted as themselves, not as the browser they
+         happen to be sitting at. Without this, playing time was recorded
+         against a device id and the same person on two devices looked like
+         two people. */
+      const who = (params.session && accounts.sessionAccount(params.session)) || params.account;
+      markAlive(who, params.play || 'survival');
       res.writeHead(200, Object.assign({ 'content-type': 'image/gif', 'cache-control': 'no-store' }, cors));
       res.end(Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64'));
       return;
@@ -922,26 +981,81 @@ const server = http.createServer((req, res) => {
     const key = (req.url.split('key=')[1] || '').split('&')[0];
     if (key !== ADMIN_KEY) { json(401, { error: 'wrong key' }); return; }
     const days = Object.keys(stats.days).sort().slice(-30);
-    const accounts = Object.entries(ledger.accounts)
-      .sort((a, b) => b[1].balance - a[1].balance).slice(0, 40)
-      .map(([id, a]) => ({ id, balance: a.balance, caught: a.caught, lastSeen: a.lastSeen }));
+
+    /* Who these people actually are.
+
+       This table used to be built from `ledger.accounts`, which is keyed by
+       the id a browser makes up for itself. So the admin page showed rows
+       like "acc_zmi9tg7gmu1lz2fa · $0.00 · 0 caught" — a device, with a
+       device's balance, which is always nothing for anybody who signed in,
+       because a signed-in player's money goes to their real account.
+
+       Real accounts live in Supabase. They are read on a timer rather than
+       on every poll, because this page refreshes every fifteen seconds and
+       nobody needs a database query that often. */
+    refreshRealAccounts();
+    const real = (realAccounts.rows || []).map((a) => ({
+      id: a.id,
+      name: a.username || a.email || a.id,
+      email: a.email || '',
+      balance: a.balance || 0,
+      caught: a.caught || 0,
+      minutes: playedBy(a.id),
+      member: !!a.subscribed,
+      lastSeen: a.last_seen || null,
+      real: true
+    }));
+    /* Anybody playing without an account still counts as somebody playing,
+       so they are listed too — plainly marked as a guest rather than dressed
+       up as an account. */
+    const guests = Object.entries(ledger.accounts)
+      .filter(([id]) => !real.some(r => r.id === id))
+      .map(([id, a]) => ({
+        id, name: 'Guest · ' + id.slice(-6), email: '',
+        balance: a.balance || 0, caught: a.caught || 0,
+        minutes: playedBy(id), member: false, lastSeen: a.lastSeen, real: false
+      }));
+    /* Deliberately not called `accounts`: that is the name of the account
+       store itself, and a local shadowing it inside this block is how a
+       previous refactor turned a working route into a ReferenceError. */
+    const table = real.concat(guests)
+      .sort((a, b) => (b.balance - a.balance) || (b.minutes - a.minutes))
+      .slice(0, 60);
     json(200, {
       wallet: {
-        paid: ledger.paid, claimed: Object.keys(ledger.claimed).length,
-        accounts: Object.keys(ledger.accounts).length, top: accounts, rates: settings.rates()
+        /* What has really been earned, which is the sum of what is sitting
+           in people's accounts plus anything already paid out — not the
+           running total this process happens to remember, which goes back to
+           zero on every redeploy. */
+        paid: real.reduce((n, a) => n + a.balance, 0) +
+              payoutQueue.filter(p => p.status === 'sent').reduce((n, p) => n + p.cents, 0),
+        held: real.reduce((n, a) => n + a.balance, 0),
+        claimed: Object.keys(ledger.claimed).length,
+        accounts: real.length,
+        guests: guests.length,
+        members: real.filter(a => a.member).length,
+        top: table,
+        rates: settings.rates(),
+        source: (accountStore && accountStore.enabled) ? 'accounts' : 'memory'
       },
       lifetime: (() => {
         const live = livePlayers();
         const ps = Object.values(stats.players || {});
         const mins = Math.round(stats.minutes || 0);
+        /* Hours were rounded to a whole number, so everything up to the
+           first full hour anybody ever played showed as "0" — which reads
+           as broken tracking rather than as a quiet week. One decimal, with
+           the minutes beside it. */
         return {
-          players: ps.length,
+          players: Math.max(ps.length, real.length),
+          accounts: real.length,
+          members: real.filter(a => a.member).length,
           onlineNow: live.total,
           playingAlone: live.solo - live.inRooms > 0 ? live.solo - live.inRooms : 0,
           inRooms: live.inRooms,
           returning: ps.filter(p => p.opens > 1).length,
           minutes: mins,
-          hours: Math.round(mins / 60),
+          hours: Math.round(mins / 6) / 10,
           avgMinutes: ps.length ? Math.round(mins / ps.length) : 0
         };
       })(),
@@ -1054,6 +1168,7 @@ const server = http.createServer((req, res) => {
          below is a record of what happened, written afterwards, never the
          thing that decides. */
       const record = (paid) => {
+        accountsChanged();          // balances on the admin page are now old
         ledger.claimed[key] = { account: acc, at: Date.now(), cents: paid };
         a.balance += paid;
         a.today += paid;
@@ -1259,6 +1374,7 @@ const server = http.createServer((req, res) => {
             payoutQueue.unshift(out.payout);
             if (payoutQueue.length > 500) payoutQueue.length = 500;
             payoutsDirty = true;
+            accountsChanged();
           }
           json(200, out);
         } catch (e) {
@@ -1317,6 +1433,7 @@ const server = http.createServer((req, res) => {
           rec.usedBy = id;
           rec.usedAt = Date.now();
           codesDirty = true;
+          accountsChanged();          // they are a member now; say so at once
           console.log('  membership on for ' + id + ' (' + days + ' days, code ' + code + ')');
           json(200, {
             ok: true, until: out.until, days,
@@ -1359,7 +1476,11 @@ const server = http.createServer((req, res) => {
   });
 
   if (url === '/account/signup' && req.method === 'POST') {
-    answer((m) => accounts.signUp(m));
+    answer(async (m) => {
+      const out = await accounts.signUp(m);
+      if (out && out.ok) accountsChanged();
+      return out;
+    });
     return;
   }
   if (url === '/account/signin' && req.method === 'POST') {

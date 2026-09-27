@@ -55,6 +55,9 @@ h2{font-family:var(--display);font-size:16px;color:var(--sky);margin:0 0 10px;
   border:1px solid var(--line);border-radius:14px;padding:14px}
 .bar{flex:1;min-width:5px;background:linear-gradient(180deg, var(--glow), var(--wave));
   border-radius:5px 5px 2px 2px;position:relative}
+/* a day with nothing on it: present, so the shape of the month is real,
+   but plainly nothing rather than a short bar that looks like one visit */
+.bar.none{background:var(--line);border-radius:3px}
 .bar:hover::after{content:attr(data-label);position:absolute;bottom:100%;left:50%;
   transform:translateX(-50%);background:#04203A;border:1px solid var(--line);
   border-radius:7px;padding:3px 8px;font-size:11px;white-space:nowrap;margin-bottom:6px}
@@ -82,6 +85,10 @@ td.num{color:var(--glow);font-family:var(--display)}
 #history .bar small{font-size:9px;color:#8b95ad;white-space:nowrap}
 #history .two{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:18px}
 @media (max-width:720px){#history .two{grid-template-columns:1fr}}
+.tag{display:inline-block;background:rgba(111,227,196,.16);color:var(--glow);
+  border:1px solid rgba(111,227,196,.4);border-radius:999px;
+  padding:1px 8px;font-size:10.5px;letter-spacing:.04em;vertical-align:middle}
+.tag.quiet{background:var(--panel-2);color:var(--muted);border-color:var(--line)}
 
 /* ---- the money controls ---- */
 .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;
@@ -153,11 +160,15 @@ td button{padding:6px 11px;font-size:12px;margin-right:6px}
   <section>
     <h2>Player earnings</h2>
     <div class="cards">
-      <div class="card"><small>Paid out</small><b id="w-paid">—</b></div>
+      <div class="card"><small>Earned, all time</small><b id="w-paid">—</b></div>
+      <div class="card"><small>Held in wallets</small><b id="w-held">—</b></div>
       <div class="card"><small>Creatures claimed</small><b id="w-claimed">—</b></div>
       <div class="card"><small>Accounts</small><b id="w-accounts">—</b></div>
+      <div class="card"><small>Members</small><b id="w-members">—</b></div>
+      <div class="card"><small>Playing without one</small><b id="w-guests">—</b></div>
     </div>
-    <table style="margin-top:12px"><thead><tr><th>Account</th><th>Balance</th><th>Caught</th><th>Last seen</th></tr></thead>
+    <p class="note" id="w-source"></p>
+    <table style="margin-top:12px"><thead><tr><th>Player</th><th>Balance</th><th>Caught</th><th>Played</th><th>Last seen</th></tr></thead>
       <tbody id="w-top"></tbody></table>
   </section>
 
@@ -607,13 +618,31 @@ async function history(key) {
 function draw(d) {
   const w = d.wallet || { paid: 0, claimed: 0, accounts: 0, top: [] };
   const money = (c) => '$' + ((c || 0) / 100).toFixed(2);
+  const safe = (t) => String(t == null ? '' : t).replace(/[<>&]/g, (c) =>
+    ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
   $('#w-paid').textContent = money(w.paid);
+  $('#w-held').textContent = money(w.held);
   $('#w-claimed').textContent = fmt(w.claimed);
   $('#w-accounts').textContent = fmt(w.accounts);
+  $('#w-members').textContent = fmt(w.members);
+  $('#w-guests').textContent = fmt(w.guests);
+  $('#w-source').textContent = w.source === 'accounts'
+    ? 'Names and balances come from the accounts database, so this is what people really have.'
+    : 'Accounts are not connected, so this is only what this server remembers and it goes ' +
+      'when the server restarts. Check SUPABASE_SERVICE_KEYS on Render.';
+  /* Real people first, by name. This table used to print the id a browser
+     makes up for itself — "acc_zmi9tg…" with nothing next to it — because
+     it was built from the device ledger rather than from the accounts. */
   $('#w-top').innerHTML = (w.top || []).map(a =>
-    '<tr><td>' + a.id + '</td><td class="num">' + money(a.balance) + '</td>' +
-    '<td class="num">' + a.caught + '</td><td>' + (a.lastSeen || '').slice(0, 16).replace('T', ' ') +
-    '</td></tr>').join('') || '<tr><td class="note" colspan="4">Nobody has earned yet</td></tr>';
+    '<tr><td>' + safe(a.name || a.id) +
+      (a.member ? ' <span class="tag">member</span>' : '') +
+      (a.real === false ? ' <span class="tag quiet">no account</span>' : '') +
+      (a.email ? '<br><small class="note">' + safe(a.email) + '</small>' : '') +
+    '</td><td class="num">' + money(a.balance) + '</td>' +
+    '<td class="num">' + fmt(a.caught) + '</td>' +
+    '<td class="num">' + (a.minutes ? a.minutes + ' min' : '—') + '</td>' +
+    '<td>' + String(a.lastSeen || '').slice(0, 16).replace('T', ' ') +
+    '</td></tr>').join('') || '<tr><td class="note" colspan="5">Nobody has played yet</td></tr>';
 
   $('#total').textContent = fmt(d.total);
   $('#today').textContent = fmt(d.today);
@@ -626,13 +655,29 @@ function draw(d) {
   $('#life-online').textContent = fmt(L.onlineNow);
   $('#life-return').textContent = fmt(L.returning);
   $('#life-solo').textContent = fmt(L.playingAlone);
-  $('#life-hours').textContent = fmt(L.hours);
+  $('#life-hours').textContent = (L.hours || 0) + (L.minutes ? ' (' + fmt(L.minutes) + ' min)' : '');
   $('#life-avg').textContent = (L.avgMinutes || 0) + ' min';
 
-  const max = Math.max(1, ...d.days.map(x => x.visits));
-  $('#chart').innerHTML = d.days.map(x =>
-    '<div class="bar" style="height:' + Math.max(3, (x.visits / max) * 100) + '%" ' +
-    'data-label="' + x.day + ' · ' + x.visits + '"></div>').join('') ||
+  /* Thirty bars, always.
+
+     Only the days that had a visit were drawn, so on a new server that was
+     one bar — and one bar with flex:1 is the full width of the chart, at the
+     full height because it is also the maximum. The result was a solid blue
+     rectangle that looked like a broken chart rather than like a quiet
+     month. Every day of the last thirty gets a bar now, and an empty day
+     gets a faint stub, so the shape is honest from the first visit onwards. */
+  const had = {};
+  for (const x of (d.days || [])) had[x.day] = x.visits;
+  const span = [];
+  for (let i = 29; i >= 0; i--) {
+    const day = new Date(Date.now() - i * 86400000).toISOString().slice(0, 10);
+    span.push({ day, visits: had[day] || 0 });
+  }
+  const max = Math.max(1, ...span.map(x => x.visits));
+  $('#chart').innerHTML = span.map(x =>
+    '<div class="bar' + (x.visits ? '' : ' none') + '" style="height:' +
+    (x.visits ? Math.max(6, (x.visits / max) * 100) : 3) + '%" ' +
+    'data-label="' + x.day + ' \u00b7 ' + x.visits + '"></div>').join('') ||
     '<span class="note">No visits recorded yet.</span>';
 
   $('#refs').innerHTML = d.referrers.map(([host, n]) =>
