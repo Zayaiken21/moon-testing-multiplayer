@@ -537,6 +537,30 @@ const server = http.createServer((req, res) => {
     'access-control-allow-methods': 'GET,POST,OPTIONS'
   };
   if (req.method === 'OPTIONS') { res.writeHead(204, cors); res.end(); return; }
+
+  /* The heartbeat.
+
+     Every open copy of the game calls this once a minute, so a free service
+     that would otherwise fall asleep after fifteen quiet minutes stays up as
+     long as anybody at all is playing. It is answered before the rate
+     limiter and before anything that touches a disk, so it is as close to
+     free as an answer can be, and it can never be the thing that runs the
+     server out of room. */
+  if (req.url.split('?')[0] === '/health') {
+    let players = 0;
+    for (const r of rooms.values()) players += r.players.size;
+    res.writeHead(200, Object.assign({ 'content-type': 'application/json',
+      'cache-control': 'no-store' }, cors));
+    res.end(JSON.stringify({
+      ok: true,
+      up: Math.round(process.uptime()),
+      rooms: rooms.size,
+      players,
+      at: Date.now()
+    }));
+    return;
+  }
+
   if (overLimit(req)) {
     res.writeHead(429, Object.assign({ 'content-type': 'application/json', 'retry-after': '60' }, cors));
     res.end(JSON.stringify({ error: 'Too many requests, try again in a minute.' }));
