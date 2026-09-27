@@ -655,6 +655,42 @@ class Accounts {
     return { ok: true, account: this.publicView(account), until: account.subscription_until };
   }
 
+  /**
+   * Add creatures to this account's index.
+   *
+   * The index used to live in the save file, so it started again from
+   * nothing with every new world and was lost outright on a new phone —
+   * which makes a thing you are meant to fill in over months rather
+   * pointless. It belongs to the account.
+   *
+   * Only ever adds. A creature met once is met for good, so there is no
+   * ordering problem between two devices and nothing to lose if a message
+   * goes astray: the next one carries the same names again.
+   */
+  async meetCreatures(accountId, species) {
+    const account = await this.find(accountId);
+    if (!account) return { ok: false, why: 'No such account.' };
+
+    const had = Array.isArray(account.creatures) ? account.creatures : [];
+    const all = new Set(had);
+    const before = all.size;
+    for (const k of (species || [])) {
+      const name = String(k || '').slice(0, 60);
+      if (name) all.add(name);
+      if (all.size > 5000) break;          // a roster of 999: this is plenty
+    }
+    if (all.size === before) {
+      return { ok: true, count: before, added: 0, creatures: had };
+    }
+
+    account.creatures = Array.from(all);
+    await this.put(account);
+    if (this.enabled && account.saved === false) {
+      return { ok: false, why: account.whyNotSaved || 'could not be saved', count: before };
+    }
+    return { ok: true, count: all.size, added: all.size - before, creatures: account.creatures };
+  }
+
   /** Point every rate and ceiling at a live settings object. */
   setSettings(s) { this.settings = s; return this; }
 
@@ -764,6 +800,9 @@ class Accounts {
       subscribed: !!a.subscribed, subscription_until: a.subscription_until || null,
       member: this.isMember(a), tier: this.tier(a),
       companions: (a.companions || []).length, role: a.role || 'player',
+      /* the index, and how far through it they are */
+      creatures: Array.isArray(a.creatures) ? a.creatures : [],
+      creaturesMet: Array.isArray(a.creatures) ? a.creatures.length : 0,
       withdraw: this.withdrawableFor(a)
     };
   }

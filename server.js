@@ -356,6 +356,18 @@ settings.load().then(() => {
               v.withdraw.member.min + 'c');
 });
 
+/* Memberships, paid for with a card. Nothing here can grant one: Stripe's
+   webhook does that, and only after its signature has been checked. */
+const { Stripe } = require('./stripe');
+const stripe = new Stripe({ log: (m) => console.log('  stripe: ' + m) });
+if (stripe.ready) {
+  console.log('  stripe: ready (' + (stripe.live ? 'LIVE — real cards' : 'test mode') +
+              ', ' + stripe.trialDays + ' day free trial)');
+  if (!stripe.webhookSecret) console.log('  stripe: ' + stripe.trouble);
+} else {
+  console.log('  stripe: not set up — ' + stripe.trouble);
+}
+
 const STATS_FILE = path.join(__dirname, 'stats.json');
 /* The word that guards the admin page.
 
@@ -463,6 +475,52 @@ function refreshRealAccounts(force) {
     console.log('  could not read accounts for the admin page: ' + (e && e.message));
     realAccounts.at = Date.now();          // do not hammer it after a failure
   }).then(() => { realAccounts.reading = false; });
+}
+
+/**
+ * Act on something Stripe told us.
+ *
+ * Runs after the webhook has already been answered, so nothing here can make
+ * Stripe wait or retry. Every path either finds the account and writes to it
+ * or says in the log why it could not — a membership that silently fails to
+ * turn on is the worst outcome, so it is never silent.
+ */
+async function handleStripeEvent(event) {
+  const note = stripe.read(event);
+  if (!note) return;                       // an event we do not act on
+
+  /* Whose membership is this? The account id is put into the checkout and
+     onto the subscription when it is made, so it is usually right there. An
+     event made another way — cancelled from the Stripe dashboard, say —
+     arrives without it, and then the customer id is the thread back. */
+  let id = note.account;
+  if (!id && note.customer) {
+    const found = await accounts.findByCustomer(note.customer);
+    if (found) id = found.id;
+  }
+  if (!id) {
+    console.log('  stripe: ' + event.type + ' arrived with nobody attached to it');
+    return;
+  }
+
+  if (note.what === 'started') {
+    /* The checkout finished. The subscription's own event says whether it is
+       trialing or active, and that one does the granting — but the customer
+       and subscription ids are worth writing down now, so a later event
+       without metadata can still be matched to this person. */
+    await accounts.applyStripe(id, {
+      customer: note.customer, subscription: note.subscription
+    });
+    console.log('  stripe: checkout finished for ' + id);
+    accountsChanged();
+    return;
+  }
+
+  const out = await accounts.applyStripe(id, note);
+  console.log('  stripe: ' + id + ' is now ' + (note.member ? 'a member' : 'not a member') +
+              ' (' + note.status + (note.trialing ? ', on the free trial' : '') + ')' +
+              (out.ok ? '' : ' — BUT IT DID NOT SAVE: ' + out.why));
+  accountsChanged();
 }
 
 /* Something changed that the admin page's cached list would not know about —
@@ -734,6 +792,35 @@ const server = http.createServer((req, res) => {
       accounts: accounts && accounts.enabled ? 'supabase' : 'memory',
       at: Date.now()
     }));
+    return;
+  }
+
+  /* Stripe, telling us something.
+
+     Answered before the rate limiter: Stripe can send a burst of events and
+     being refused would mean a membership silently not turning on. It is
+     safe to let through because nothing is believed until the signature has
+     been checked against the webhook secret. */
+  if (req.url.split('?')[0] === '/stripe/webhook' && req.method === 'POST') {
+    let raw = '';
+    req.on('data', (c) => { raw += c; if (raw.length > 262144) req.destroy(); });
+    req.on('end', () => {
+      const checked = stripe.verify(raw, req.headers['stripe-signature']);
+      if (!checked.ok) {
+        console.log('  stripe: refused a webhook — ' + checked.why);
+        res.writeHead(400, Object.assign({ 'content-type': 'application/json' }, cors));
+        res.end(JSON.stringify({ ok: false, why: checked.why }));
+        return;
+      }
+      /* Answer at once. Stripe gives a webhook a short time to reply and
+         retries anything slow, so the work is done after the reply rather
+         than making Stripe wait on a database. */
+      res.writeHead(200, Object.assign({ 'content-type': 'application/json' }, cors));
+      res.end(JSON.stringify({ ok: true }));
+      handleStripeEvent(checked.event).catch((e) =>
+        console.log('  stripe: could not act on ' + (checked.event && checked.event.type) +
+                    ': ' + (e && e.message)));
+    });
     return;
   }
 
@@ -1404,8 +1491,78 @@ const server = http.createServer((req, res) => {
       membership: v.membership,
       free: { cap: v.caps.free, withdraw: v.withdraw.free },
       member: { cap: v.caps.member, withdraw: v.withdraw.member },
-      checkout: 'code',
-      note: 'Memberships are turned on with a code.'
+      /* What the store should offer. With Stripe set up it is a card and a
+         free trial; without it, the code the admin page makes. Both work at
+         once, because a code is still how you hand a membership to a friend
+         or put right a payment that went wrong. */
+      checkout: stripe.ready ? 'card' : 'code',
+      card: stripe.ready,
+      trialDays: stripe.ready ? stripe.trialDays : 0,
+      testMode: stripe.ready ? !stripe.live : false,
+      note: stripe.ready
+        ? (stripe.trialDays
+            ? stripe.trialDays + ' days free, then ' +
+              (v.membership.priceCents / 100).toFixed(2) + ' a month. Cancel any time.'
+            : 'Cancel any time.')
+        : 'Memberships are turned on with a code.'
+    });
+    return;
+  }
+
+  /* Somewhere to go and start the free trial.
+
+     All this does is ask Stripe for a page and hand back its address. No card
+     number comes anywhere near this server or the game — Stripe hosts the
+     form — and nothing here turns a membership on. That happens when Stripe
+     calls the webhook back. */
+  if (url === '/store/checkout' && req.method === 'POST') {
+    let body = '';
+    req.on('data', c => { body += c; if (body.length > 2048) req.destroy(); });
+    req.on('end', () => {
+      (async () => {
+        let m = {};
+        try { m = JSON.parse(body || '{}'); } catch (e) {}
+        try {
+          const id = accounts.sessionAccount(String(m.session || ''));
+          if (!id) {
+            json(200, { ok: false, why: 'Sign in first, so the membership has somewhere to go.' });
+            return;
+          }
+          const account = await accounts.find(id);
+          if (!account) { json(200, { ok: false, why: 'No such account.' }); return; }
+          if (accounts.isMember(account)) {
+            json(200, { ok: false, why: 'You are already a member.', member: true });
+            return;
+          }
+          const out = await stripe.checkout(account);
+          if (!out.ok) console.log('  stripe: no checkout for ' + id + ' — ' + out.why);
+          json(200, out);
+        } catch (e) {
+          console.log('  /store/checkout failed: ' + (e && e.message));
+          json(200, { ok: false, why: 'Could not reach the card machine just then.' });
+        }
+      })();
+    });
+    return;
+  }
+
+  /* Cancelling, or changing the card. Stripe hosts this too. */
+  if (url === '/store/manage' && req.method === 'POST') {
+    let body = '';
+    req.on('data', c => { body += c; if (body.length > 2048) req.destroy(); });
+    req.on('end', () => {
+      (async () => {
+        let m = {};
+        try { m = JSON.parse(body || '{}'); } catch (e) {}
+        try {
+          const id = accounts.sessionAccount(String(m.session || ''));
+          if (!id) { json(200, { ok: false, why: 'Sign in first.' }); return; }
+          const account = await accounts.find(id);
+          json(200, await stripe.portal(account));
+        } catch (e) {
+          json(200, { ok: false, why: 'Could not open the billing page.' });
+        }
+      })();
     });
     return;
   }
@@ -1450,10 +1607,33 @@ const server = http.createServer((req, res) => {
   }
 
   /* ---------------- accounts ---------------- */
+  /* Read what was sent, and answer even when it is too much.
+
+     This used to call `req.destroy()` the moment a body went over the
+     limit, which does not refuse the request — it cuts the connection
+     underneath it. The caller sees "fetch failed", which is the same thing
+     it would see if the server were down, so it cannot tell a request it
+     should shrink from a server it should wait for. Now the rest is thrown
+     away, the connection is left alone, and the answer says what happened. */
+  const MOST = 65536;
   const readBody = (cb) => {
     let body = '';
-    req.on('data', c => { body += c; if (body.length > 8192) req.destroy(); });
-    req.on('end', () => { let m = {}; try { m = JSON.parse(body || '{}'); } catch (e) {} cb(m); });
+    let over = false;
+    req.on('data', (c) => {
+      if (over) return;
+      body += c;
+      if (body.length > MOST) { over = true; body = ''; }
+    });
+    req.on('end', () => {
+      if (over) {
+        json(413, { ok: false, why: 'That was too much to send at once. ' +
+                                    'Send it in smaller pieces.' });
+        return;
+      }
+      let m = {};
+      try { m = JSON.parse(body || '{}'); } catch (e) {}
+      cb(m);
+    });
   };
 
   /* Answer, always.
@@ -1516,6 +1696,22 @@ const server = http.createServer((req, res) => {
     })();
     return;
   }
+  /* The creature index, which belongs to the person rather than to the save
+     file they happen to be playing. Only ever adds, so a message that goes
+     astray costs nothing — the next one carries the same names again. */
+  if (url === '/account/creatures' && req.method === 'POST') {
+    answer(async (m) => {
+      const id = accounts.sessionAccount(m.session);
+      if (!id) return { ok: false, why: 'not signed in' };
+      const list = Array.isArray(m.species) ? m.species.slice(0, 400) : [];
+      if (!list.length) return { ok: false, why: 'nothing to add' };
+      const out = await accounts.meetCreatures(id, list);
+      if (out.ok && out.added) accountsChanged();
+      return out;
+    });
+    return;
+  }
+
   if (url === '/account/companions' && req.method === 'POST') {
     answer(async (m) => {
       const id = accounts.sessionAccount(m.session);
