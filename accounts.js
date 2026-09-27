@@ -74,13 +74,49 @@ class Accounts {
        it is an easy thing to type into Render, and it used to make new URL()
        throw deep inside a request — which surfaced as a page that waited for
        ever for an answer that was never coming. */
+    /* Clean both, rather than trusting either.
+
+       Two things go wrong when these are pasted into a hosting panel, and
+       both of them used to break every account request:
+
+       • an address without https:// in front made new URL() throw;
+       • a key that picked up a line break on the way in made Node refuse to
+         put it in a header at all — "Invalid character in header content".
+
+       A Supabase key is a JWT: three dot-separated runs of plain characters
+       with no spaces anywhere in it. So every scrap of whitespace can be
+       taken out with no risk of damaging a good key, and a key that arrived
+       wrapped across two lines simply works. */
+    const tidyKey = (k) => String(k || '').replace(/\s+/g, '');
     this.shards = urls.map((url, i) => ({
-      url: String(url).replace(/\/+$/, '').replace(/^(?!https?:\/\/)/, 'https://'),
-      key: keys[i] || keys[0] || ''
+      url: String(url).replace(/\s+/g, '').replace(/\/+$/, '').replace(/^(?!https?:\/\/)/, 'https://'),
+      key: tidyKey(keys[i] || keys[0] || '')
     }));
     this.table = opts.table || 'accounts';
     this.log = opts.log || (() => {});
     this.enabled = this.shards.length > 0 && !!this.shards[0].key;
+
+    /* Say plainly, once, at boot, whether this is going to work. Finding out
+       from a child's sign-in screen is not the way to learn that a key was
+       pasted wrong. */
+    this.shards.forEach((sh, i) => {
+      if (!sh.key) { this.log('shard ' + i + ' (' + sh.url + ') has no service key'); return; }
+      const looksJwt = /^[\w-]+\.[\w-]+\.[\w-]+$/.test(sh.key);
+      let role = '';
+      try {
+        const body = JSON.parse(Buffer.from(sh.key.split('.')[1], 'base64').toString('utf8'));
+        role = body && body.role || '';
+      } catch (e) {}
+      if (!looksJwt) {
+        this.log('shard ' + i + ': that key does not look like a Supabase key. ' +
+                 'Copy the service_role key from Settings → API Keys.');
+      } else if (role === 'anon') {
+        this.log('shard ' + i + ': that is the ANON key, which can do nothing here. ' +
+                 'Use the service_role key instead.');
+      } else {
+        this.log('shard ' + i + ' ready: ' + sh.url + (role ? ' (' + role + ')' : ''));
+      }
+    });
     this.memory = new Map();        // the fallback when Supabase is not configured
     this.resets = new Map();        // reset token -> { email, at }
     this.sessions = new Map();      // session token -> { id, at }
@@ -107,7 +143,9 @@ class Accounts {
       }
       const payload = body ? JSON.stringify(body) : null;
       const mod = u.protocol === 'http:' ? http : https;
-      const req = mod.request({
+      let req;
+      try {
+        req = mod.request({
         host: u.hostname,
         port: u.port || (u.protocol === 'http:' ? 80 : 443),
         path: u.pathname + u.search,
@@ -127,6 +165,12 @@ class Accounts {
           resolve({ status: res.statusCode, body: parsed });
         });
       });
+      } catch (e) {
+        // a header the runtime will not accept, most often a key with a line
+        // break in it: say so, and answer, rather than throwing into the void
+        this.log('could not build the request: ' + (e && e.message));
+        return resolve({ status: 0, body: null, why: e && e.message });
+      }
       req.on('error', () => resolve({ status: 0, body: null }));
       req.setTimeout(10000, () => { req.destroy(); resolve({ status: 0, body: null }); });
       if (payload) req.write(payload);
