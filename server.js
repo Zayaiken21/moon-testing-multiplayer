@@ -341,7 +341,22 @@ const pendingResets = [];        // shown on the admin page until email is wired
 const store = new GitHubStore({ localDir: __dirname, log: (m) => console.log('  store: ' + m) });
 
 const STATS_FILE = path.join(__dirname, 'stats.json');
-const ADMIN_KEY = opt('admin', process.env.ADMIN_KEY || 'voxelia');
+/* The word that guards the admin page.
+
+   It used to fall back to "voxelia", which is in the name of the game and so
+   is the first thing anybody would try: every balance and every account was
+   one guess away. If nothing is set, a long random one is made at boot and
+   printed in the Render log instead, so an unguarded admin page cannot
+   happen by accident. Set ADMIN_KEY in Render to choose your own and keep it
+   the same across restarts. */
+const ADMIN_KEY = opt('admin', process.env.ADMIN_KEY ||
+  (() => {
+    const made = require('crypto').randomBytes(12).toString('hex');
+    console.log('  ADMIN_KEY is not set. Using this one until the next restart:');
+    console.log('    ' + made);
+    console.log('  Set ADMIN_KEY in the environment to keep one of your own.');
+    return made;
+  })());
 
 const stats = {
   total: 0, today: 0, todayKey: '', days: {}, referrers: {}, devices: {},
