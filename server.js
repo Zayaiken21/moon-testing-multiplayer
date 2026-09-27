@@ -1095,6 +1095,17 @@ server.on('upgrade', (req, raw) => {
       const msg = JSON.stringify({ t: 'mode', mode: room.mode });
       for (const p of room.players.values()) p.socket.send(msg);
 
+    } else if (m.t === 'drop') {
+      // something put on the ground where everyone can see it
+      if (!Number.isFinite(+m.x) || !Number.isFinite(+m.y) || !Number.isFinite(+m.z)) return;
+      broadcast({ t: 'drop', id, b: m.b | 0, x: +m.x, y: +m.y, z: +m.z }, id);
+
+    } else if (m.t === 'bust') {
+      // which block somebody is part way through breaking
+      if (!Number.isFinite(+m.x) || !Number.isFinite(+m.y) || !Number.isFinite(+m.z)) return;
+      broadcast({ t: 'bust', id, x: m.x | 0, y: m.y | 0, z: m.z | 0,
+                  p: Math.max(0, Math.min(1, +m.p || 0)) }, id);
+
     } else if (m.t === 'look') {
       /* What somebody is wearing. Sent when it changes rather than with every
          step, which is what made every movement packet six times its size. */
