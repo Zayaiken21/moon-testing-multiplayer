@@ -334,6 +334,7 @@ const { Accounts } = require('./accounts');
 /* Real accounts live in Supabase; GitHub keeps a snapshot so Supabase is never
    the only copy. Nothing about money is decided in a browser. */
 const accounts = new Accounts({ log: (m) => console.log('  accounts: ' + m) });
+const accountStore = accounts;   // the same thing, under a name nothing shadows
 const pendingResets = [];        // shown on the admin page until email is wired up
 
 /* The record lives in a GitHub repo, not on Render's disk, because that disk is
@@ -422,6 +423,32 @@ function livePlayers() {
   return { total: Math.max(solo, inRooms), solo, inRooms, sessions: seen.size };
 }
 
+/* Visits, written somewhere that survives a restart.
+
+   They are gathered up and sent in batches rather than one at a time: a
+   busy minute should cost one round trip, not two hundred. Anything that
+   cannot be sent is kept and tried again on the next batch, and the whole
+   thing is best-effort — counting people must never be able to slow the
+   game down or take the server with it. */
+const visitQueue = [];
+
+function queueVisit(row) {
+  if (!accounts || !accounts.enabled) return;
+  visitQueue.push(row);
+  if (visitQueue.length > 500) visitQueue.splice(0, visitQueue.length - 500);
+}
+
+async function flushVisits() {
+  if (!visitQueue.length || !accounts || !accounts.enabled) return;
+  const batch = visitQueue.splice(0, 200);
+  const out = await accounts.insert('visits', batch).catch(() => ({ ok: false }));
+  if (!out.ok) {
+    // put them back, but never let the queue grow without limit
+    visitQueue.unshift(...batch.slice(0, 200 - visitQueue.length));
+  }
+}
+setInterval(() => { flushVisits().catch(() => {}); }, 20000);
+
 function recordVisit(req, body) {
   const key = dayKey();
   if (stats.todayKey !== key) { stats.todayKey = key; stats.today = 0; }
@@ -452,6 +479,17 @@ function recordVisit(req, body) {
   const live = Array.from(rooms.values()).length;
   if (live > stats.peakRooms) stats.peakRooms = live;
   statsDirty = true;
+
+  queueVisit({
+    device_id: String((body && body.account) || '').slice(0, 64) || null,
+    account_id: (body && body.session && accounts.sessionAccount(String(body.session))) || null,
+    kind: String((body && body.mode) || 'open').slice(0, 16),
+    mode: String((body && body.play) || '').slice(0, 16) || null,
+    ref: host.slice(0, 120),
+    device,
+    country: String(req.headers['cf-ipcountry'] || req.headers['x-vercel-ip-country'] || '').slice(0, 8) || null,
+    installed: !!(body && body.standalone)
+  });
 }
 
 /* ---------- the ledger ----------
@@ -688,11 +726,40 @@ const server = http.createServer((req, res) => {
       referrers: Object.entries(stats.referrers).sort((a, b) => b[1] - a[1]).slice(0, 12),
       devices: Object.entries(stats.devices).sort((a, b) => b[1] - a[1]),
       sessions: stats.sessions.slice(0, 40),
+      kept: !!(accountStore && accountStore.enabled),
       rooms: Array.from(rooms.values()).map(r => ({
         code: r.code, name: r.name, players: r.players.size, max: r.max,
         public: r.public, closed: !!r.closed, edits: r.edits.size
       }))
     });
+    return;
+  }
+
+  /* The numbers that survive a restart.
+
+     Everything in /admin/data lives in this process, so a redeploy or a
+     spin-down takes it with it — which is why the admin page kept going
+     back to zero. These come out of the database, where they stay. */
+  if (url === '/admin/history') {
+    const key = (req.url.split('key=')[1] || '').split('&')[0];
+    if (key !== ADMIN_KEY) { json(401, { error: 'wrong key' }); return; }
+    if (!accountStore || !accountStore.enabled) {
+      json(200, { kept: false, why: 'Set SUPABASE_URLS and SUPABASE_SERVICE_KEYS to keep history.' });
+      return;
+    }
+    (async () => {
+      try {
+        const [days, sources, devices] = await Promise.all([
+          accountStore.read('visit_days?order=day.desc&limit=60'),
+          accountStore.read('visit_sources?limit=15'),
+          accountStore.read('visit_devices?limit=12')
+        ]);
+        json(200, { kept: true, days: days || [], sources: sources || [], devices: devices || [],
+                    waiting: visitQueue.length });
+      } catch (e) {
+        json(200, { kept: true, error: String(e && e.message) });
+      }
+    })();
     return;
   }
 
@@ -704,7 +771,16 @@ const server = http.createServer((req, res) => {
     req.on('end', () => {
       let m = {};
       try { m = JSON.parse(body || '{}'); } catch (e) {}
-      const acc = String(m.account || '').slice(0, 64);
+      /* Whose money this is.
+
+         The page sends a device id, which is all a guest has. If it also
+         sends a session, that session is the truth: the money belongs to
+         whoever is signed in, not to whatever id the page happened to make
+         up, and a page cannot claim to be somebody else by sending their id.
+         This is what puts earnings into a real account rather than leaving
+         them on one browser. */
+      const signedIn = m.session ? accounts.sessionAccount(String(m.session)) : null;
+      const acc = signedIn || String(m.account || '').slice(0, 64);
       const key = String(m.creature || '').slice(0, 120);
       const rarity = String(m.rarity || 'common');
       const mode = String(m.mode || '');
@@ -743,7 +819,30 @@ const server = http.createServer((req, res) => {
       a.claims++;
       ledger.paid += cents;
       ledgerDirty = true;
-      json(200, { ok: true, cents, balance: a.balance, caught: a.caught, rarity });
+
+      /* Somebody signed in is paid into their real account — the one that
+         follows them between devices and the one a payout comes from. The
+         ledger above stays as the record of every claim, and the balance
+         sent back is the account's, because that is the one they will see
+         when they next sign in anywhere else. */
+      if (signedIn) {
+        accounts.credit(signedIn, key, false, rarity).then((out) => {
+          if (out && out.ok) {
+            json(200, { ok: true, cents: out.cents, balance: out.balance,
+                        caught: out.caught !== undefined ? out.caught : a.caught,
+                        today: out.today, cap: out.cap, rarity, account: acc });
+          } else {
+            console.log('  credit ' + signedIn + ': ' + (out && out.why));
+            json(200, { ok: true, cents, balance: a.balance, caught: a.caught, rarity, account: acc });
+          }
+        }).catch((e) => {
+          console.log('  credit failed: ' + (e && e.message));
+          json(200, { ok: true, cents, balance: a.balance, caught: a.caught, rarity, account: acc });
+        });
+        return;
+      }
+
+      json(200, { ok: true, cents, balance: a.balance, caught: a.caught, rarity, account: acc });
     });
     return;
   }
@@ -780,9 +879,31 @@ const server = http.createServer((req, res) => {
   }
 
   if (url.startsWith('/wallet')) {
-    const acc = (req.url.split('account=')[1] || '').split('&')[0];
+    const q = req.url.split('?')[1] || '';
+    const val = (name) => {
+      const hit = q.split('&').find((kv) => kv.indexOf(name + '=') === 0);
+      return hit ? decodeURIComponent(hit.slice(name.length + 1)) : '';
+    };
+    const sess = val('session');
+    const signedIn = sess ? accounts.sessionAccount(sess) : null;
+    const acc = (signedIn || val('account')).slice(0, 64);
     if (!acc) { json(400, { error: 'account required' }); return; }
-    const a = account(decodeURIComponent(acc).slice(0, 64));
+
+    /* Signed in, the wallet shown is the account's own — the one that
+       follows them from their phone to a computer. A guest sees the one
+       that belongs to this browser. */
+    if (signedIn) {
+      accounts.find(signedIn).then((a) => {
+        if (!a) { json(200, { balance: 0, caught: 0, today: 0, dailyCap: DAILY_CAP_CENTS, rates: RARITY_CENTS }); return; }
+        json(200, {
+          balance: a.balance || 0, caught: a.caught || 0, today: a.today || 0,
+          dailyCap: accounts.dailyCap(a), rates: RARITY_CENTS,
+          username: a.username, signedIn: true
+        });
+      }).catch(() => json(200, { balance: 0, caught: 0, today: 0, dailyCap: DAILY_CAP_CENTS, rates: RARITY_CENTS }));
+      return;
+    }
+    const a = account(acc);
     json(200, {
       balance: a.balance, caught: a.caught, today: a.today,
       dailyCap: DAILY_CAP_CENTS, rates: RARITY_CENTS

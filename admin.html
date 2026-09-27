@@ -71,6 +71,17 @@ td.num{color:var(--glow);font-family:var(--display)}
 .pill.live{border-color:var(--sky);color:var(--sky)}
 .note{color:var(--muted);font-size:12.5px;line-height:1.5}
 #error{color:#FF9E9E;font-size:13px;margin-top:10px}
+
+/* The day-by-day chart on the history panel. */
+#history .chart{display:flex;align-items:flex-end;gap:4px;height:120px;
+  padding:8px 0 0;overflow-x:auto}
+#history .bar{display:flex;flex-direction:column;align-items:center;gap:4px;
+  flex:0 0 auto;width:26px}
+#history .bar i{display:block;width:100%;border-radius:4px 4px 0 0;
+  background:linear-gradient(180deg,#7FFFD9,#2f9d84)}
+#history .bar small{font-size:9px;color:#8b95ad;white-space:nowrap}
+#history .two{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:18px}
+@media (max-width:720px){#history .two{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
@@ -149,6 +160,13 @@ td.num{color:var(--glow);font-family:var(--display)}
     <table><thead><tr><th>When</th><th>Device</th><th>From</th><th>Installed</th></tr></thead>
       <tbody id="sessions"></tbody></table>
   </section>
+
+  <section>
+    <h2>Over time</h2>
+    <p class="note">Kept in the database, so a redeploy or a quiet night does
+      not wipe it. Every bar is a day.</p>
+    <div id="history"><p class="note">Loading…</p></div>
+  </section>
 </main>
 
 <script>
@@ -168,8 +186,63 @@ async function load() {
     $('#gate').classList.add('hidden');
     document.querySelector('main').classList.add('ready');
     draw(await res.json());
+    history(key);
+    // keep it live, the way a dashboard should be
+    clearInterval(window._adminTick);
+    window._adminTick = setInterval(async () => {
+      try {
+        const r = await fetch('/admin/data?key=' + encodeURIComponent(key));
+        if (r.ok) draw(await r.json());
+      } catch (e) {}
+    }, 15000);
   } catch (e) {
     $('#error').textContent = 'Could not reach the server.';
+  }
+}
+
+/* The part that survives a restart. Everything above lives in the running
+   server and goes back to zero when Render redeploys or the service sleeps;
+   this comes out of the database. */
+async function history(key) {
+  const box = document.getElementById('history');
+  if (!box) return;
+  try {
+    const res = await fetch('/admin/history?key=' + encodeURIComponent(key));
+    const d = await res.json();
+    if (!d.kept) {
+      box.innerHTML = '<p class="note">' + (d.why || 'History is not being kept.') + '</p>';
+      return;
+    }
+    const days = d.days || [];
+    if (!days.length) {
+      box.innerHTML = '<p class="note">Nothing recorded yet. Open the game once and come back.</p>';
+      return;
+    }
+    const most = Math.max.apply(null, days.map(r => r.visits || 0)) || 1;
+    const bars = days.slice(0, 30).reverse().map((r) => {
+      const h = Math.max(2, Math.round((r.visits / most) * 90));
+      return '<div class="bar" title="' + r.day + ': ' + r.visits + ' visits, ' +
+             r.devices + ' devices"><i style="height:' + h + 'px"></i><small>' +
+             String(r.day).slice(5) + '</small></div>';
+    }).join('');
+    const rows = (list, a, b) => (list || []).map(r =>
+      '<tr><td>' + (r[a] || '—') + '</td><td class="num">' + (r.devices || 0) +
+      '</td><td class="num">' + (r.visits || 0) + '</td></tr>').join('');
+    box.innerHTML =
+      '<div class="chart">' + bars + '</div>' +
+      '<div class="two">' +
+        '<div><h3>Where they come from</h3><table><thead><tr><th>Source</th>' +
+          '<th class="num">Devices</th><th class="num">Visits</th></tr></thead><tbody>' +
+          (rows(d.sources, 'ref') || '<tr><td class="note" colspan="3">nothing yet</td></tr>') +
+        '</tbody></table></div>' +
+        '<div><h3>What they play on</h3><table><thead><tr><th>Device</th>' +
+          '<th class="num">Devices</th><th class="num">Visits</th></tr></thead><tbody>' +
+          (rows(d.devices, 'device') || '<tr><td class="note" colspan="3">nothing yet</td></tr>') +
+        '</tbody></table></div>' +
+      '</div>' +
+      (d.waiting ? '<p class="note">' + d.waiting + ' waiting to be written.</p>' : '');
+  } catch (e) {
+    box.innerHTML = '<p class="note">Could not read the history.</p>';
   }
 }
 

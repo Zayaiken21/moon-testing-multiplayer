@@ -36,8 +36,19 @@ const crypto = require('crypto');
    particular animal is paid for it. */
 const RARITY_CENTS = { common: 0, uncommon: 2, rare: 6, exotic: 12, legendary: 30 };
 const CENTS_PER_CREATURE = 1;          // kept for anything still asking
-const FREE_DAILY_CAP = 5;         // five cents a day without a subscription
-const MEMBER_DAILY_CAP = 25;      // twenty five with one
+/* How much an account may earn in a day.
+
+   These have to sit above what a single animal is worth or the ceiling
+   refuses the very thing it is meant to allow: at five cents a day, taming
+   one rare animal (six) was turned down every time, so a free player could
+   never be paid for anything above uncommon at all. Thirty lets a free
+   player have a good day — a legendary, or five rare ones — and a
+   membership raises it fivefold.
+
+   Change these two numbers to change what the game costs you. Nothing else
+   needs touching: the wallet shows whatever they say. */
+const FREE_DAILY_CAP = 30;        // thirty cents a day without a subscription
+const MEMBER_DAILY_CAP = 150;     // a dollar fifty with one
 
 /* ------------------------------------------------------------------ crypto */
 
@@ -134,6 +145,26 @@ class Accounts {
     this.memory = new Map();        // the fallback when Supabase is not configured
     this.resets = new Map();        // reset token -> { email, at }
     this.sessions = new Map();      // session token -> { id, at }
+  }
+
+  /* A way in for anything else that needs the database.
+
+     Analytics are kept here too, because a count on Render's own disk does
+     not survive a redeploy and quietly goes back to zero. These two are the
+     whole of that: put rows in, read a view back out. */
+  async insert(table, rows) {
+    if (!this.enabled || !rows || !rows.length) return { ok: false };
+    const res = await this._call(0, 'POST', table, rows, { prefer: 'return=minimal' });
+    if (res.status >= 200 && res.status < 300) return { ok: true };
+    const said = res.body && (res.body.message || res.body.details);
+    this.log('could not write to ' + table + ': ' + res.status + (said ? ' ' + said : ''));
+    return { ok: false, status: res.status, why: said };
+  }
+
+  async read(route) {
+    if (!this.enabled) return null;
+    const res = await this._call(0, 'GET', route);
+    return res.status === 200 ? res.body : null;
   }
 
   /** Which project an account lives in. Stored on the row so it never moves. */
@@ -375,8 +406,8 @@ class Accounts {
       return {
         ok: false,
         why: cap === FREE_DAILY_CAP
-          ? 'You have reached today\u2019s five cents. A membership raises it to twenty five.'
-          : 'You have reached today\u2019s twenty five cents.',
+          ? 'That is all for today. A membership raises the daily limit.'
+          : 'That is all for today. It starts again tomorrow.',
         balance: account.balance, today: account.today, cap
       };
     }
@@ -384,7 +415,8 @@ class Accounts {
     account.balance += cents;
     account.caught = (account.caught || 0) + 1;
     await this.put(account);
-    return { ok: true, cents, balance: account.balance, today: account.today, cap };
+    return { ok: true, cents, balance: account.balance, caught: account.caught,
+             today: account.today, cap };
   }
 
   async setSubscription(accountId, on, until) {
