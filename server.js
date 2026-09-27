@@ -529,6 +529,12 @@ function overLimit(req) {
   return rec.n > LIMIT;
 }
 
+/* A promise nobody was waiting on used to disappear without trace, taking
+   the reply with it. Now it is at least written down. */
+process.on('unhandledRejection', (e) => {
+  console.log('  unhandled: ' + (e && e.message ? e.message : e));
+});
+
 /* ---------- HTTP ---------- */
 const server = http.createServer((req, res) => {
   const cors = {
@@ -556,6 +562,9 @@ const server = http.createServer((req, res) => {
       up: Math.round(process.uptime()),
       rooms: rooms.size,
       players,
+      // where accounts are kept: "supabase" once the keys are in, otherwise
+      // "memory", which works but forgets everything on the next deploy
+      accounts: accounts && accounts.enabled ? 'supabase' : 'memory',
       at: Date.now()
     }));
     return;
@@ -807,43 +816,67 @@ const server = http.createServer((req, res) => {
     req.on('end', () => { let m = {}; try { m = JSON.parse(body || '{}'); } catch (e) {} cb(m); });
   };
 
+  /* Answer, always.
+
+     These used to be `readBody(async m => json(200, await ...))`. If the work
+     inside threw — a mistyped Supabase address was enough — the rejected
+     promise went nowhere, no reply was ever written, and the page sat waiting
+     for an answer that was never coming. That is what "could not reach the
+     server" really was: the server, reached, saying nothing.
+
+     Now every one of them ends in a reply, even if the reply is bad news. */
+  const answer = (work) => readBody(async (m) => {
+    try {
+      const out = await work(m);
+      json(200, out === undefined ? { ok: true } : out);
+    } catch (e) {
+      console.log('  ' + url + ' failed: ' + (e && e.message));
+      json(500, { ok: false, why: 'The server hit a problem: ' + (e && e.message || 'unknown') });
+    }
+  });
+
   if (url === '/account/signup' && req.method === 'POST') {
-    readBody(async (m) => json(200, await accounts.signUp(m)));
+    answer((m) => accounts.signUp(m));
     return;
   }
   if (url === '/account/signin' && req.method === 'POST') {
-    readBody(async (m) => json(200, await accounts.signIn(m)));
+    answer((m) => accounts.signIn(m));
     return;
   }
   if (url === '/account/forgot' && req.method === 'POST') {
-    readBody(async (m) => {
+    answer(async (m) => {
       const out = await accounts.beginReset(m.email);
       // the token is not emailed yet: it is handed to the admin page instead
       if (out.token) pendingResets.unshift({ email: String(m.email || '').toLowerCase(), token: out.token, at: Date.now() });
       if (pendingResets.length > 50) pendingResets.length = 50;
-      json(200, { ok: true, sent: true });   // the same answer whether or not the email exists
+      return { ok: true, sent: true };   // the same answer whether or not the email exists
     });
     return;
   }
   if (url === '/account/reset' && req.method === 'POST') {
-    readBody(async (m) => json(200, await accounts.completeReset(m.token, m.password)));
+    answer((m) => accounts.completeReset(m.token, m.password));
     return;
   }
   if (url.startsWith('/account/me')) {
     const t = (req.url.split('session=')[1] || '').split('&')[0];
     (async () => {
-      const id = accounts.sessionAccount(decodeURIComponent(t || ''));
-      if (!id) { json(401, { error: 'not signed in' }); return; }
-      const a = await accounts.find(id);
-      json(200, a ? accounts.publicView(a) : { error: 'gone' });
+      try {
+        const id = accounts.sessionAccount(decodeURIComponent(t || ''));
+        if (!id) { json(401, { error: 'not signed in' }); return; }
+        const a = await accounts.find(id);
+        json(200, a ? accounts.publicView(a) : { error: 'gone' });
+      } catch (e) {
+        console.log('  /account/me failed: ' + (e && e.message));
+        json(500, { ok: false, why: 'The server hit a problem.' });
+      }
     })();
     return;
   }
   if (url === '/account/companions' && req.method === 'POST') {
-    readBody(async (m) => {
+    answer(async (m) => {
       const id = accounts.sessionAccount(m.session);
-      if (!id) { json(401, { error: 'not signed in' }); return; }
-      json(200, await accounts.setCompanions(id, m.companions));
+      if (!id) return { ok: false, why: 'not signed in' };
+      return accounts.setCompanions(id, m.companions);
     });
     return;
   }

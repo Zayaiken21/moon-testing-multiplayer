@@ -68,7 +68,16 @@ class Accounts {
       .split(',').map(s => s.trim()).filter(Boolean);
     const keys = (opts.keys || process.env.SUPABASE_SERVICE_KEYS || process.env.SUPABASE_SERVICE_KEY || '')
       .split(',').map(s => s.trim()).filter(Boolean);
-    this.shards = urls.map((url, i) => ({ url, key: keys[i] || keys[0] || '' }));
+    /* Tidy each address up rather than trusting it.
+
+       "oxmjxuuymplhnbcdltho.supabase.co" pasted without https:// in front of
+       it is an easy thing to type into Render, and it used to make new URL()
+       throw deep inside a request — which surfaced as a page that waited for
+       ever for an answer that was never coming. */
+    this.shards = urls.map((url, i) => ({
+      url: String(url).replace(/\/+$/, '').replace(/^(?!https?:\/\/)/, 'https://'),
+      key: keys[i] || keys[0] || ''
+    }));
     this.table = opts.table || 'accounts';
     this.log = opts.log || (() => {});
     this.enabled = this.shards.length > 0 && !!this.shards[0].key;
@@ -88,7 +97,14 @@ class Accounts {
     return new Promise((resolve) => {
       const s = this.shards[shard];
       if (!s) return resolve({ status: 0, body: null });
-      const u = new URL(s.url + '/rest/v1/' + route);
+      let u;
+      try {
+        u = new URL(s.url + '/rest/v1/' + route);
+      } catch (e) {
+        // a bad address is a configuration problem, not a reason to go silent
+        this.log('SUPABASE_URLS does not look like an address: ' + s.url);
+        return resolve({ status: 0, body: null, why: 'bad supabase url' });
+      }
       const payload = body ? JSON.stringify(body) : null;
       const mod = u.protocol === 'http:' ? http : https;
       const req = mod.request({
@@ -151,9 +167,19 @@ class Accounts {
     delete row.shard;
     const res = await this._call(shard, 'POST', this.table,
       [row], { prefer: 'resolution=merge-duplicates,return=representation' });
-    if (res.status >= 200 && res.status < 300) return account;
-    this.log('could not save ' + account.id + ' to shard ' + shard + ' (status ' + res.status + ')');
-    this.memory.set(account.id, account);       // never lose it outright
+    if (res.status >= 200 && res.status < 300) { account.saved = true; return account; }
+    /* It did not save. Keep it in memory so nothing is lost outright, but
+       say so: a caller that tells somebody "welcome, your account is made"
+       when it is not has done them real harm — they will come back tomorrow
+       and find no account at all. */
+    const why = res.status === 401 || res.status === 403
+      ? 'the service key was refused (' + res.status + ')'
+      : res.status === 0 ? 'the database could not be reached'
+      : 'the database answered ' + res.status;
+    this.log('could not save ' + account.id + ' to shard ' + shard + ': ' + why);
+    this.memory.set(account.id, account);
+    account.saved = false;
+    account.whyNotSaved = why;
     return account;
   }
 
@@ -186,6 +212,14 @@ class Accounts {
       shard: this.shardFor(id)
     };
     await this.put(account);
+    /* Only say the account exists if it really does. Told "welcome" over an
+       account that was never written, somebody comes back tomorrow to find
+       nothing there and no idea why. */
+    if (this.enabled && account.saved === false) {
+      return { ok: false,
+               why: 'Your account could not be saved — ' + (account.whyNotSaved || 'the database refused it') +
+                    '. Nothing was lost; try again in a minute.' };
+    }
     return { ok: true, account: this.publicView(account), session: this.startSession(id) };
   }
 
