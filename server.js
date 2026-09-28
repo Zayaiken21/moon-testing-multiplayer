@@ -12,6 +12,16 @@
    the same address in the game's Multiplayer screen.
    ===================================================================== */
 'use strict';
+/* ======================================================================
+   01 · SETUP — what this process was told to be
+   ----------------------------------------------------------------------
+   http, fs, path, crypto, opt, has, PORT, SEED, MODE, NAME, MAX_PLAYERS,
+   DIRECTORY, ROOM, PRIVATE, IS_HUB, SAVE_FILE
+
+   One program does two jobs depending on how it is started: the directory
+   everybody talks to, or a single game world. Render runs it as the
+   directory.
+   ====================================================================== */
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
@@ -40,6 +50,14 @@ const SAVE_FILE = path.join(__dirname, opt('save', 'world-' + SEED + '.json'));
 /* ---------- rooms ---------- */
 /* One process hosts many games. A player presses Host in the game, the relay
    makes a room and hands back a seven digit code. Nobody types an IP. */
+/* ======================================================================
+   02 · ROOMS — the worlds people can join
+   ----------------------------------------------------------------------
+   rooms, newCode, roomFile, createRoom, saveRoom
+
+   A room is a seed, a mode, a list of players and whatever they have built.
+   Rooms are written to disk so a restart does not lose anybody's world.
+   ====================================================================== */
 const rooms = new Map();          // code -> { code, name, seed, mode, public, max, edits, players }
 
 function newCode() {
@@ -123,6 +141,15 @@ setInterval(() => {
    A player who has not moved is left out, so a room standing still costs
    nothing at all.
    --------------------------------------------------------------- */
+/* ======================================================================
+   03 · THE RELAY — what players send each other
+   ----------------------------------------------------------------------
+   MOVE_HZ, NEAR_FROM, NEAR_RANGE, realmBeat, nextId
+
+   Twenty times a second each player's position goes out to everybody near
+   them, batched into one message. Players in space and players on the
+   ground are kept apart so neither sees the other's traffic.
+   ====================================================================== */
 const MOVE_HZ = 20;
 /* Above this many players in one room, each person is only told about the
    ones near them. NEAR_RANGE is in blocks and is comfortably past how far
@@ -213,6 +240,15 @@ setInterval(() => {
 let nextId = 1;
 
 /* ---------- a small, correct WebSocket implementation ---------- */
+/* ======================================================================
+   04 · WEBSOCKETS, WRITTEN OUT BY HAND
+   ----------------------------------------------------------------------
+   GUID, acceptKey, encodeFrame, class Socket
+
+   There is no websocket library here on purpose: this whole server has no
+   dependencies, so there is nothing to install and nothing to go out of
+   date. This is the handshake and the framing, done directly.
+   ====================================================================== */
 const GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 
 function acceptKey(key) {
@@ -297,17 +333,15 @@ class Socket {
 }
 
 /* ---------- directory of advertised games ---------- */
+/* ======================================================================
+   05 · THE DIRECTORY — games that are advertising
+   ----------------------------------------------------------------------
+   hub, announce
+
+   Hosts say they exist every so often; anything that stops saying so is
+   dropped after ninety seconds.
+   ====================================================================== */
 const hub = new Map();              // address -> { name, seed, players, maxPlayers, seen }
-function hubList() {
-  const now = Date.now();
-  for (const [k, v] of hub) if (now - v.seen > 90000) hub.delete(k);
-  return Array.from(hub.values())
-    .filter(v => !v.private && !v.closed)
-    .map(v => ({
-      name: v.name, seed: v.seed, address: v.address, room: v.room,
-      players: v.players, maxPlayers: v.maxPlayers
-    }));
-}
 
 function announce() {
   if (!DIRECTORY) return;
@@ -333,6 +367,14 @@ const { Accounts } = require('./accounts');
 
 /* Real accounts live in Supabase; GitHub keeps a snapshot so Supabase is never
    the only copy. Nothing about money is decided in a browser. */
+/* ======================================================================
+   06 · THE PIECES BOLTED ON
+   ----------------------------------------------------------------------
+   accounts, accountStore, pendingResets, store, settings, stripe
+
+   Accounts in Supabase, the shop, the numbers the admin page can change,
+   and Stripe. Each one is in its own file; this is where they are wired in.
+   ====================================================================== */
 const accounts = new Accounts({ log: (m) => console.log('  accounts: ' + m) });
 const accountStore = accounts;   // the same thing, under a name nothing shadows
 const pendingResets = [];        // shown on the admin page until email is wired up
@@ -368,6 +410,18 @@ if (stripe.ready) {
   console.log('  stripe: not set up — ' + stripe.trouble);
 }
 
+/* ======================================================================
+   07 · WHO IS ACTUALLY PLAYING
+   ----------------------------------------------------------------------
+   STATS_FILE, ADMIN_KEY, stats, statsDirty, dayKey, heartbeats, aliveNames,
+   ALIVE_MS, markAlive, realAccounts, REAL_EVERY, refreshRealAccounts,
+   accountsChanged, playedBy, livePlayers, visitQueue, queueVisit,
+   flushVisits, recordVisit
+
+   Real numbers for the admin page: who is signed in right now, under their
+   real username, with their real balance and real playtime. A browser that
+   stops sending a heartbeat is counted as gone.
+   ====================================================================== */
 const STATS_FILE = path.join(__dirname, 'stats.json');
 /* The word that guards the admin page.
 
@@ -485,6 +539,14 @@ function refreshRealAccounts(force) {
  * or says in the log why it could not — a membership that silently fails to
  * turn on is the worst outcome, so it is never silent.
  */
+/* ======================================================================
+   08 · STRIPE — acting on money that moved
+   ----------------------------------------------------------------------
+   handleStripeEvent
+
+   What to do when a subscription starts, renews, is cancelled or fails. The
+   signature is checked before any of this runs.
+   ====================================================================== */
 async function handleStripeEvent(event) {
   const note = stripe.read(event);
   if (!note) return;                       // an event we do not act on
@@ -623,6 +685,16 @@ function recordVisit(req, body) {
    Money is decided here and nowhere else. The browser is only ever a display.
    A creature is identified by the world it came from plus its own spawn key,
    so the same animal can never be claimed twice, by anyone, ever.        */
+/* ======================================================================
+   09 · THE LEDGER, PAYOUTS AND MEMBER CODES
+   ----------------------------------------------------------------------
+   LEDGER_FILE, ledger, ledgerDirty, payoutQueue, payoutsDirty, memberCodes,
+   codesDirty, makeCode
+
+   Every penny that moves is written down, every withdrawal request is
+   queued for a person to approve, and membership codes can be handed out
+   without going through Stripe at all.
+   ====================================================================== */
 const LEDGER_FILE = path.join(__dirname, 'ledger.json');
 const ledger = {
   accounts: {},        // account -> { balance, caught, claims, created, lastSeen }
@@ -713,6 +785,14 @@ for (const sig of ['SIGTERM', 'SIGINT']) {
    finished loading, and nothing else. Everything that decides money asks
    `settings` — see settings.js — so that changing a rate is a button on the
    admin page rather than an edit in three files and a redeploy. */
+/* ======================================================================
+   10 · WHAT AN ANIMAL IS WORTH
+   ----------------------------------------------------------------------
+   RARITY_CENTS, DAILY_CAP_CENTS, account
+
+   The pay rates by rarity and the daily cap. These are the defaults; the
+   live numbers come from the admin page through settings.js.
+   ====================================================================== */
 const RARITY_CENTS = { common: 0, uncommon: 2, rare: 6, exotic: 12, legendary: 30 };
 const DAILY_CAP_CENTS = 500;          // only ever used if settings are missing
 
@@ -731,6 +811,13 @@ function account(id) {
 }
 
 /* ---------- a light rate limit, per address ---------- */
+/* ======================================================================
+   11 · RATE LIMITING
+   ----------------------------------------------------------------------
+   hits, LIMIT, WINDOW, overLimit
+
+   How often one address may ask for something before it is told to wait.
+   ====================================================================== */
 const hits = new Map();          // ip -> { n, since }
 /* Requests allowed from one address per minute.
 
@@ -761,6 +848,15 @@ process.on('unhandledRejection', (e) => {
 });
 
 /* ---------- HTTP ---------- */
+/* ======================================================================
+   12 · THE HTTP SERVER AND EVERY ROUTE
+   ----------------------------------------------------------------------
+   server, and all of /health /rooms /visit /claim /account/* /wallet
+   /settings /rates /store/* /payout/* /stripe/webhook /admin/*
+
+   The rest of the file. Every address the game or the admin page can ask
+   for, in the order they are checked.
+   ====================================================================== */
 const server = http.createServer((req, res) => {
   const cors = {
     'access-control-allow-origin': '*',
