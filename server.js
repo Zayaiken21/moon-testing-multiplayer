@@ -2165,6 +2165,21 @@ server.on('upgrade', (req, raw) => {
         }
       }
       broadcast({ t: 'crew', realm, planet: m.planet, crew, site: m.site || null });
+    } else if (m.t === 'flying') {
+      /* Who is at the controls, while they are flying.
+
+         'crew' above is the heavy one: it moves everybody between worlds and
+         rearranges vehicles, and it is only sent at a launch or a landing.
+         This is the light one, sent four times a second while a ship is
+         under way, and it does nothing but pass on who is flying whom, so
+         passengers follow the pilot as it happens rather than catching up at
+         the landing.
+
+         The pilot is whoever sent it, never whoever the message claims, so
+         nobody can announce themselves as the pilot of somebody else's
+         ship. */
+      const crew = Array.isArray(m.crew) ? m.crew.slice(0, 24).map(String) : [];
+      if (crew.length) broadcast({ t: 'flying', pilot: id, crew }, id);
     } else if (m.t === 'signal') {
       const dest = room.players.get(m.to);
       if (dest) dest.socket.send(JSON.stringify({ t: 'signal', from: id, data: m.data }));
